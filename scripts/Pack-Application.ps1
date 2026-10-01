@@ -17,7 +17,8 @@ if (-not $PublishDirectory) { $PublishDirectory = Join-Path $OutputDirectory 'ap
 if (Test-Path $OutputDirectory) { throw "Use a new, empty output directory: $OutputDirectory" }
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 if (-not $SkipPublish) {
-    $restoreArguments = if ($NuGetConfig) { @("-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))") } else { @() }
+    [string[]]$restoreArguments = @()
+    if ($NuGetConfig) { $restoreArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))" }
     dotnet publish $Project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false "-p:Version=$Version" -o $PublishDirectory @restoreArguments
     if ($LASTEXITCODE) { throw 'Application publish failed.' }
 }

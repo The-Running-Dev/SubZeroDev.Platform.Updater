@@ -1,0 +1,32 @@
+name: Publish NuGet
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: windows-latest
+    environment: nuget
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Verify release tag and owner-selected license
+        shell: pwsh
+        run: |
+          $version = dotnet msbuild src/SubZeroDev.Platform.Updater/SubZeroDev.Platform.Updater.csproj -getProperty:Version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Run publication on the matching version tag.' }
+          if (-not (Test-Path LICENSE)) { throw 'Owner must select a license before NuGet publication.' }
+      - shell: pwsh
+        run: ./scripts/Test-Package.ps1
+      - name: Publish package and symbols to nuget.org
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if (-not $env:NUGET_API_KEY) { throw 'Configure NUGET_API_KEY in the nuget environment or replace this step with owner-configured trusted publishing.' }
+          dotnet nuget push artifacts/packages/*.nupkg --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json
+          if ($LASTEXITCODE) { throw 'NuGet publication failed.' }

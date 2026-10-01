@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SubZeroDev.Platform.Updater/SubZeroDev.Platform.Updater.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SubZeroDev.Platform.Updater.Tests/SubZeroDev.Platform.Updater.Tests.csproj" />
+  </Folder>
+</Solution>

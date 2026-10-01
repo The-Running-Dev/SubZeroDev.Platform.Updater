@@ -18,7 +18,7 @@ jobs:
         run: ./scripts/Test-Package.ps1
       - name: Verify distribution formats and pinned tool
         shell: pwsh
-        run: ./scripts/Pack-Application.ps1 -Project tests/UpdaterProbe/UpdaterProbe.csproj -AppId SubZeroDev.UpdaterProbe -MainExe UpdaterProbe.exe -Version 1.0.0 -ReleaseNotes README.md -OutputDirectory artifacts/probe
+        run: ./scripts/Pack-Application.ps1 -Project tests/UpdaterProbe/UpdaterProbe.csproj -AppId SubZeroDev.UpdaterProbe -MainExe UpdaterProbe.exe -Version 1.0.0 -ReleaseNotes README.md -OutputDirectory artifacts/probe -NuGetConfig artifacts/consumer.nuget.config
       - name: Verify packaged portable A to B to C
         shell: pwsh
         run: ./scripts/Test-PortableUpdate.ps1

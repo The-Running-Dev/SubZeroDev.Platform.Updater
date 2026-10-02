@@ -17,14 +17,16 @@ internal sealed class VelopackEngine : IUpdateEngine
     private readonly IVelopackLocator locator;
     private readonly PublicDownloader downloader;
     private readonly Func<UpdateChannel, IUpdateSource>? sourceFactory;
+    private readonly Action<string>? log;
     private sealed record Selection(UpdateManager Manager, UpdateInfo Update);
 
-    internal VelopackEngine(UpdaterOptions options, IVelopackLocator? locator = null, Func<UpdateChannel, IUpdateSource>? sourceFactory = null)
+    internal VelopackEngine(UpdaterOptions options, IVelopackLocator? locator = null, Func<UpdateChannel, IUpdateSource>? sourceFactory = null, Action<string>? log = null)
     {
         this.options = options;
         this.locator = locator ?? (VelopackLocator.IsCurrentSet ? VelopackLocator.Current : VelopackLocator.CreateDefaultForPlatform());
         downloader = new(options.NetworkTimeout);
         this.sourceFactory = sourceFactory;
+        this.log = log;
     }
 
     public bool IsSupported => OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
@@ -34,10 +36,14 @@ internal sealed class VelopackEngine : IUpdateEngine
     {
         downloader.OperationToken = token;
         UpdateCandidate? best = null;
+        InvalidDataException? invalid = null;
         foreach (var stream in channel == UpdateChannel.Preview ? new[] { UpdateChannel.Stable, UpdateChannel.Preview } : [UpdateChannel.Stable]) {
-            var source = sourceFactory?.Invoke(stream) ?? new ValidatedGithubSource(options, stream, downloader);
+            var source = sourceFactory?.Invoke(stream) ?? new ValidatedGithubSource(options, stream, downloader, log);
             var manager = new UpdateManager(source, new() { ExplicitChannel = stream == UpdateChannel.Stable ? "win-stable" : "win-preview", AllowVersionDowngrade = false, MaximumDeltasBeforeFallback = -1 }, locator);
-            var update = await manager.CheckForUpdatesAsync().ConfigureAwait(false);
+            UpdateInfo? update;
+            // An invalid stream must not hide a valid update in the other stream.
+            try { update = await manager.CheckForUpdatesAsync().ConfigureAwait(false); }
+            catch (InvalidDataException ex) { invalid = ex; continue; }
             token.ThrowIfCancellationRequested();
             if (update is null) continue;
             // Full packages keep selection and integrity checking independent of delta history.
@@ -47,6 +53,7 @@ internal sealed class VelopackEngine : IUpdateEngine
                 metadata?.Published, metadata?.Url, update.TargetFullRelease.NotesMarkdown, new Selection(manager, update));
             if (best is null || update.TargetFullRelease.Version > SemanticVersion.Parse(best.TargetVersion)) best = candidate;
         }
+        if (best is null && invalid is not null) throw invalid;
         return best;
     }
 
@@ -73,6 +80,16 @@ internal sealed class VelopackEngine : IUpdateEngine
         }
     }
 
+    public void VerifyCanApply(UpdateCandidate candidate)
+    {
+        // Checked before the host releases its tray and instance guard, so the common apply failures leave it untouched.
+        var selected = (Selection)candidate.Identity;
+        if (locator.UpdateExePath is not { } updater || !File.Exists(updater))
+            throw new FileNotFoundException("The Velopack updater executable is missing.");
+        if (locator.PackagesDir is not { } packages || !File.Exists(Path.Combine(packages, selected.Update.TargetFullRelease.FileName)))
+            throw new FileNotFoundException("The staged update package is missing.");
+    }
+
     public void Apply(UpdateCandidate candidate)
     {
         var selected = (Selection)candidate.Identity;
@@ -86,14 +103,23 @@ internal sealed class ValidatedGithubSource : GithubSource
 {
     private readonly UpdaterOptions options;
     private readonly UpdateChannel stream;
+    private readonly Action<string>? log;
     private readonly Dictionary<GithubRelease, (string Tag, DateTimeOffset? Published)> releases = [];
-    internal ValidatedGithubSource(UpdaterOptions options, UpdateChannel stream, IFileDownloader downloader)
+    private int rejectedReleases;
+    internal ValidatedGithubSource(UpdaterOptions options, UpdateChannel stream, IFileDownloader downloader, Action<string>? log = null)
         : base(options.PublicReleaseRepository.ToString(), accessToken: null, prerelease: stream == UpdateChannel.Preview, downloader)
-        => (this.options, this.stream) = (options, stream);
+        => (this.options, this.stream, this.log) = (options, stream, log);
+
+    private void Reject(string reason)
+    {
+        // Release text is untrusted, so only the category is logged.
+        try { log?.Invoke($"category=rejected-release stream={stream} reason={reason}"); } catch { /* Diagnostics cannot fail an update. */ }
+    }
 
     protected override async Task<GithubRelease[]> GetReleases(bool includePrereleases)
     {
         releases.Clear();
+        rejectedReleases = 0;
         var result = new List<GithubRelease>();
         // Bound work, but scan beyond GithubSource's default ten releases so busy preview streams don't hide stable releases.
         for (int page = 1; page <= 3; page++) {
@@ -109,26 +135,31 @@ internal sealed class ValidatedGithubSource : GithubSource
                 var release = JsonSerializer.Deserialize<GithubRelease>(element.GetRawText())!;
                 string feed = stream == UpdateChannel.Preview ? "releases.win-preview.json" : "releases.win-stable.json";
                 if (!release.Assets.Any(a => a.Name == feed)) continue;
-                if (!Regex.IsMatch(tag, pattern) || !SemanticVersion.TryParse(tag[1..], out _)) throw new InvalidDataException("Invalid release tag.");
+                // One malformed release must not block updates from the valid ones, so it is skipped rather than fatal.
+                if (!Regex.IsMatch(tag, pattern) || !SemanticVersion.TryParse(tag[1..], out _)) { rejectedReleases++; Reject("tag"); continue; }
                 result.Add(release);
                 releases.Add(release, (tag, release.PublishedAt is { } date ? new DateTimeOffset(DateTime.SpecifyKind(date, DateTimeKind.Utc)) : null));
             }
             if (document.RootElement.GetArrayLength() < 100) break;
         }
+        if (result.Count == 0 && rejectedReleases > 0) throw new InvalidDataException("No release in this channel passed validation.");
         return result.ToArray();
     }
 
     public override async Task<VelopackAssetFeed> GetReleaseFeed(IVelopackLogger logger, string? appId, string channel, Guid? stagingId = null, VelopackAsset? latestLocalRelease = null)
     {
         var feed = await base.GetReleaseFeed(logger, appId, channel, stagingId, latestLocalRelease).ConfigureAwait(false);
-        foreach (var asset in feed.Assets) {
+        var valid = feed.Assets.Where(asset => {
             var release = ((GitBaseAsset)asset).Release;
-            var tag = releases[release].Tag;
-            if (asset.PackageId != options.AppId || asset.Size <= 0 || asset.FileName != Path.GetFileName(asset.FileName) ||
-                !Regex.IsMatch(asset.SHA256 ?? "", "^[A-F0-9]{64}$") || asset.Version != SemanticVersion.Parse(tag[1..]) ||
-                !release.Assets.Any(a => a.Name == asset.FileName)) throw new InvalidDataException("Release feed identity, version, hash, or asset is invalid.");
-        }
-        return feed;
+            if (releases.TryGetValue(release, out var metadata) && asset.PackageId == options.AppId && asset.Size > 0 && asset.FileName == Path.GetFileName(asset.FileName) &&
+                Regex.IsMatch(asset.SHA256 ?? "", "^[A-F0-9]{64}$") && asset.Version == SemanticVersion.Parse(metadata.Tag[1..]) &&
+                release.Assets.Any(a => a.Name == asset.FileName)) return true;
+            Reject("asset");
+            return false;
+        }).ToArray();
+        // A channel with nothing valid left is reported as invalid rather than silently up to date.
+        if (valid.Length == 0 && (feed.Assets.Length > 0 || rejectedReleases > 0)) throw new InvalidDataException("Release feed identity, version, hash, or asset is invalid.");
+        return valid.Length == feed.Assets.Length ? feed : new VelopackAssetFeed { Assets = valid };
     }
 
     public override async Task DownloadReleaseEntry(IVelopackLogger logger, VelopackAsset releaseEntry, string localFile, Action<int> progress, CancellationToken cancelToken)
@@ -151,9 +182,9 @@ internal sealed class ValidatedGithubSource : GithubSource
     }
 }
 
-internal sealed class PublicDownloader(TimeSpan timeout) : IFileDownloader, IDisposable
+internal sealed class PublicDownloader(TimeSpan timeout, HttpMessageHandler? handler = null) : IFileDownloader, IDisposable
 {
-    private readonly HttpClient client = new() { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient client = new(handler ?? new HttpClientHandler()) { Timeout = Timeout.InfiniteTimeSpan };
     internal CancellationToken OperationToken { get; set; }
 
     private async Task<HttpResponseMessage> SendAsync(string url, CancellationToken token)
@@ -180,20 +211,22 @@ internal sealed class PublicDownloader(TimeSpan timeout) : IFileDownloader, IDis
         }
     }
 
-    private async Task<T> RequestAsync<T>(string url, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Task<T>> consume)
+    // The timeout bounds the wait for response headers and, through the restart callback, each stall while reading the body.
+    private async Task<T> RequestAsync<T>(string url, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra);
         linked.CancelAfter(timeout);
         try {
             using var response = await SendAsync(url, linked.Token).ConfigureAwait(false);
-            return await consume(response, linked.Token).ConfigureAwait(false);
+            return await consume(response, linked.Token, () => linked.CancelAfter(timeout)).ConfigureAwait(false);
         } catch (OperationCanceledException) when (!OperationToken.IsCancellationRequested && !extra.IsCancellationRequested) {
             throw new TimeoutException("The update request timed out.");
         }
     }
 
     public Task<byte[]> DownloadBytes(string url, IDictionary<string, string>? headers = null, double timeout = 30) =>
-        RequestAsync(url, default, async (r, token) => {
+        // Metadata is small, so one deadline covers the whole response.
+        RequestAsync(url, default, async (r, token, _) => {
             if (r.Content.Headers.ContentLength > 8 * 1024 * 1024) throw new InvalidDataException("Release metadata is too large.");
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             using var output = new MemoryStream();
@@ -209,12 +242,14 @@ internal sealed class PublicDownloader(TimeSpan timeout) : IFileDownloader, IDis
         System.Text.Encoding.UTF8.GetString(await DownloadBytes(url, headers, timeout).ConfigureAwait(false));
 
     public Task DownloadFile(string url, string targetFile, Action<int> progress, IDictionary<string, string>? headers = null, double timeout = 30, CancellationToken cancelToken = default) =>
-        RequestAsync(url, cancelToken, async (r, token) => {
+        // Packages can be large, so the deadline restarts whenever data arrives and only a stalled transfer times out.
+        RequestAsync(url, cancelToken, async (r, token, progressed) => {
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             await using var output = new FileStream(targetFile, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
             long total = r.Content.Headers.ContentLength ?? 0;
             byte[] buffer = new byte[81920]; int count;
             while ((count = await input.ReadAsync(buffer, token).ConfigureAwait(false)) > 0) {
+                progressed();
                 await output.WriteAsync(buffer.AsMemory(0, count), token).ConfigureAwait(false);
                 if (total > 0) progress((int)Math.Min(100, output.Length * 100 / total));
             }

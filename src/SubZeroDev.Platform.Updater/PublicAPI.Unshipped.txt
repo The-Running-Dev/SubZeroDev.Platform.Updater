@@ -60,6 +60,7 @@ SubZeroDev.Platform.Updater.IUpdaterClient.StartAutomaticCheckAsync(System.Threa
 SubZeroDev.Platform.Updater.IUpdaterClient.State.get -> SubZeroDev.Platform.Updater.UpdaterState!
 SubZeroDev.Platform.Updater.IUpdaterClient.StateChanged -> System.EventHandler<SubZeroDev.Platform.Updater.UpdaterState!>?
 SubZeroDev.Platform.Updater.IUpdateRestartCoordinator
+SubZeroDev.Platform.Updater.IUpdateRestartCoordinator.RestartAbortedAsync() -> System.Threading.Tasks.Task!
 SubZeroDev.Platform.Updater.IUpdateRestartCoordinator.RequestRestartAsync(System.Threading.CancellationToken cancellationToken) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.RestartDecision>!
 SubZeroDev.Platform.Updater.RestartDecision
 SubZeroDev.Platform.Updater.RestartDecision.Defer = 0 -> SubZeroDev.Platform.Updater.RestartDecision

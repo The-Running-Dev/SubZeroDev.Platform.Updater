@@ -39,4 +39,5 @@ record Control(string AppId, string Repository, string Data, string Target, stri
 sealed class Restart : IUpdateRestartCoordinator
 {
     public Task<RestartDecision> RequestRestartAsync(CancellationToken cancellationToken) => Task.FromResult(RestartDecision.Ready);
+    public Task RestartAbortedAsync() => Task.CompletedTask;
 }

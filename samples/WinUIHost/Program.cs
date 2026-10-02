@@ -20,7 +20,6 @@ internal static class Program
 internal sealed class HostApplication : Application, IUpdateRestartCoordinator
 {
     private Window? window;
-    private IUpdaterClient? updater;
     private UpdateCandidate? candidate;
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -32,21 +31,24 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
         var panel = new StackPanel { Spacing = 12, Padding = new Thickness(24) };
         panel.Children.Add(status); panel.Children.Add(check); panel.Children.Add(remember); panel.Children.Add(install);
         window.Content = panel; window.Activate();
-        updater = await UpdaterClient.CreateAsync(new("SubZeroDev.UpdaterProbe", new("https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWinUISample")), this);
-        updater.StateChanged += (_, state) => window.DispatcherQueue.TryEnqueue(() => {
-            status.Text = $"{state.Stage} {state.DownloadPercent}";
-            if (state.Stage == UpdateStage.Completed) window.Close();
-        });
-        void Show(CheckResult result) { status.Text = result.Message ?? result.Kind.ToString(); candidate = result.Candidate; install.IsEnabled = result.ShouldPrompt; }
-        check.Click += async (_, _) => { check.IsEnabled = false; try { Show(await updater.CheckAsync(CheckOrigin.Manual)); } finally { check.IsEnabled = true; } };
-        install.Click += async (_, _) => { if (candidate is not null) try { await updater.InstallAsync(candidate, remember.IsChecked == true); } catch (Exception ex) { status.Text = ex.Message; } };
-        window.Closed += async (_, _) => await updater.DisposeAsync();
-        if (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } resultPath) {
-            var result = await updater.CheckAsync(CheckOrigin.Manual);
-            await File.WriteAllTextAsync(resultPath, result.Kind.ToString());
-            window.Close();
-        } else Show(await updater.StartAutomaticCheckAsync());
+        // Async void handler: an escaping exception would terminate the app, so report it instead.
+        try {
+            var client = await UpdaterClient.CreateAsync(new("SubZeroDev.UpdaterProbe", new("https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWinUISample")), this);
+            client.StateChanged += (_, state) => window.DispatcherQueue.TryEnqueue(() => {
+                status.Text = $"{state.Stage} {state.DownloadPercent}";
+                if (state.Stage == UpdateStage.Completed) window.Close();
+            });
+            void Show(CheckResult result) { status.Text = result.Message ?? result.Kind.ToString(); candidate = result.Candidate; install.IsEnabled = result.ShouldPrompt; }
+            check.Click += async (_, _) => { check.IsEnabled = false; try { Show(await client.CheckAsync(CheckOrigin.Manual)); } catch (Exception ex) { status.Text = ex.Message; } finally { check.IsEnabled = true; } };
+            install.Click += async (_, _) => { if (candidate is not null) try { await client.InstallAsync(candidate, remember.IsChecked == true); } catch (Exception ex) { status.Text = ex.Message; } };
+            window.Closed += async (_, _) => await client.DisposeAsync();
+            if (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } resultPath) {
+                var result = await client.CheckAsync(CheckOrigin.Manual);
+                await File.WriteAllTextAsync(resultPath, result.Kind.ToString());
+                window.Close();
+            } else Show(await client.StartAutomaticCheckAsync());
+        } catch (Exception ex) { status.Text = ex.Message; }
     }
     public Task<RestartDecision> RequestRestartAsync(CancellationToken cancellationToken)
     {
@@ -56,5 +58,14 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
             completion.SetResult(RestartDecision.Ready);
         });
         return completion.Task.WaitAsync(cancellationToken);
+    }
+    public Task RestartAbortedAsync()
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!window!.DispatcherQueue.TryEnqueue(() => {
+            foreach (var control in ((StackPanel)window.Content).Children.OfType<Control>()) control.IsEnabled = true;
+            completion.SetResult();
+        })) completion.SetResult();
+        return completion.Task;
     }
 }

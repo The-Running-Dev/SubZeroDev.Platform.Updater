@@ -66,4 +66,70 @@ public sealed class GithubFeedTests
         Assert.Single((await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets);
         Assert.Equal(3, d.Requests.Count);
     }
+    [Fact] public async Task MalformedReleasesAreSkippedWhenValidReleasesRemain()
+    {
+        var d = new Downloader();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v1.3"), Release("v1.2.0"), Release("v1.1.0") });
+        d.Responses["https://github.com/example/app/releases/download/v1.2.0/releases.win-stable.json"] = Feed("1.2.0", hash: "bad");
+        d.Responses["https://github.com/example/app/releases/download/v1.1.0/releases.win-stable.json"] = Feed("1.1.0");
+        var log = new List<string>();
+        var feed = await new ValidatedGithubSource(new("Example", new("https://github.com/example/app"), "unused"), UpdateChannel.Stable, d, log.Add)
+            .GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable");
+        Assert.Equal("1.1.0", Assert.Single(feed.Assets).Version.ToString());
+        Assert.Equal(2, log.Count(m => m.Contains("rejected-release")));
+        Assert.DoesNotContain(log, m => m.Contains("v1.3"));
+    }
+
+    [Fact] public async Task ChannelWithOnlyMalformedReleasesIsInvalid()
+    {
+        var d = new Downloader();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v1.2"), Release("release-1.1.0") });
+        await Assert.ThrowsAsync<InvalidDataException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
+    }
+
+    private sealed class Handler(Func<Stream> body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StreamContent(body()) });
+    }
+    private sealed class TrickleStream(int chunks, TimeSpan delay) : Stream
+    {
+        private int remaining = chunks;
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (remaining == 0) return 0;
+            await Task.Delay(delay, cancellationToken);
+            remaining--;
+            buffer.Span[0] = 1;
+            return 1;
+        }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override bool CanRead => true; public override bool CanSeek => false; public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact] public async Task PackageDownloadOutlastsTimeoutWhileDataKeepsArriving()
+    {
+        string file = Path.Combine(Path.GetTempPath(), "updater-download-" + Guid.NewGuid());
+        try {
+            using var downloader = new PublicDownloader(TimeSpan.FromMilliseconds(400), new Handler(() => new TrickleStream(8, TimeSpan.FromMilliseconds(100))));
+            await downloader.DownloadFile("https://github.com/example/app/releases/download/v1.1.0/Example-full.nupkg", file, _ => { });
+            Assert.Equal(8, new FileInfo(file).Length);
+        } finally { File.Delete(file); }
+    }
+
+    [Fact] public async Task StalledPackageDownloadTimesOut()
+    {
+        string file = Path.Combine(Path.GetTempPath(), "updater-download-" + Guid.NewGuid());
+        try {
+            using var downloader = new PublicDownloader(TimeSpan.FromMilliseconds(200), new Handler(() => new TrickleStream(2, TimeSpan.FromSeconds(5))));
+            await Assert.ThrowsAsync<TimeoutException>(() => downloader.DownloadFile("https://github.com/example/app/releases/download/v1.1.0/Example-full.nupkg", file, _ => { }));
+        } finally { File.Delete(file); }
+    }
 }

@@ -40,6 +40,7 @@ public sealed class UpdaterTests
     {
         public bool IsSupported { get; set; } = true;
         internal int Checks, Downloads, Applies;
+        internal Exception? ApplyError, VerifyError;
         internal UpdateChannel Channel;
         internal UpdateCandidate? Candidate = CandidateFor("2.0.0");
         internal Exception? Error;
@@ -56,13 +57,17 @@ public sealed class UpdaterTests
             if (Error is not null) throw Error;
             return Task.CompletedTask;
         }
-        public void Apply(UpdateCandidate candidate) => Applies++;
+        public void VerifyCanApply(UpdateCandidate candidate) { if (VerifyError is not null) throw VerifyError; }
+        public void Apply(UpdateCandidate candidate) { if (ApplyError is not null) throw ApplyError; Applies++; }
         public void Dispose() { }
     }
     private sealed class Restart : IUpdateRestartCoordinator
     {
         internal RestartDecision Decision;
-        public Task<RestartDecision> RequestRestartAsync(CancellationToken token) => Task.FromResult(Decision);
+        internal int Requests, Aborts;
+        internal Func<CancellationToken, Task<RestartDecision>>? Respond;
+        public Task<RestartDecision> RequestRestartAsync(CancellationToken token) { Requests++; return Respond?.Invoke(token) ?? Task.FromResult(Decision); }
+        public Task RestartAbortedAsync() { Aborts++; return Task.CompletedTask; }
     }
     private sealed class Fixture : IAsyncDisposable
     {
@@ -227,5 +232,68 @@ public sealed class UpdaterTests
             Assert.False((await store.LoadAsync(default)).CheckAutomatically);
             Assert.Empty(Directory.GetFiles(directory, "*.tmp"));
         } finally { Directory.Delete(directory, true); }
+    }
+    [Fact] public async Task AutomaticInstallFailureIsReportedNotThrown() {
+        await using var f = new Fixture(new() { ConsentMode = ConsentMode.InstallAutomatically });
+        f.Restart.Decision = RestartDecision.Ready;
+        f.Engine.ApplyError = new IOException("Update.exe locked");
+        var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.Equal(CheckOutcomeKind.UpdateAvailable, result.Kind);
+        Assert.True(result.ShouldPrompt);
+        Assert.DoesNotContain("Update.exe", result.Message);
+        Assert.Equal(UpdateStage.Failed, f.Client.State.Stage);
+    }
+    [Fact] public async Task AutomaticCheckWithStagedUpdateDoesNotInstallAnother() {
+        await using var f = new Fixture(new() { ConsentMode = ConsentMode.InstallAutomatically });
+        Assert.False((await f.Client.StartAutomaticCheckAsync()).ShouldPrompt);
+        Assert.Equal(UpdateStage.AwaitingRestart, f.Client.State.Stage);
+        f.Clock.Now += TimeSpan.FromMinutes(16);
+        f.Engine.Candidate = CandidateFor("2.1.0");
+        var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.False(result.ShouldPrompt);
+        Assert.Equal(1, f.Engine.Downloads);
+    }
+    [Fact] public async Task ApplyFailureAfterReadyRestoresHostAndKeepsRetry() {
+        await using var f = new Fixture();
+        f.Restart.Decision = RestartDecision.Ready;
+        f.Engine.ApplyError = new IOException("Update.exe locked");
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        await Assert.ThrowsAsync<IOException>(() => f.Client.InstallAsync(candidate));
+        Assert.Equal(1, f.Restart.Aborts);
+        Assert.Equal(UpdateStage.Failed, f.Client.State.Stage);
+        f.Engine.ApplyError = null;
+        await f.Client.RetryPendingRestartAsync();
+        Assert.Equal(1, f.Engine.Applies);
+        Assert.Equal(1, f.Engine.Downloads);
+        Assert.Equal(UpdateStage.Completed, f.Client.State.Stage);
+    }
+    [Fact] public async Task CancellationAfterReadyStillApplies() {
+        await using var f = new Fixture();
+        using var cancellation = new CancellationTokenSource();
+        f.Restart.Respond = _ => { cancellation.Cancel(); return Task.FromResult(RestartDecision.Ready); };
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        await f.Client.InstallAsync(candidate, cancellationToken: cancellation.Token);
+        Assert.Equal(1, f.Engine.Applies);
+        Assert.Equal(0, f.Restart.Aborts);
+    }
+    [Fact] public async Task FailingRestartRequestRestoresHost() {
+        await using var f = new Fixture();
+        f.Restart.Respond = _ => throw new InvalidOperationException("Tray dispose failed");
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Client.InstallAsync(candidate));
+        Assert.Equal(1, f.Restart.Aborts);
+        Assert.Equal(0, f.Engine.Applies);
+    }
+    [Fact] public async Task UnapplicableStagedPackageNeverQuiescesHost() {
+        await using var f = new Fixture();
+        f.Restart.Decision = RestartDecision.Ready;
+        f.Engine.VerifyError = new FileNotFoundException("The staged update package is missing.");
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        await Assert.ThrowsAsync<FileNotFoundException>(() => f.Client.InstallAsync(candidate));
+        Assert.Equal(0, f.Restart.Requests);
+        f.Engine.VerifyError = null;
+        await f.Client.InstallAsync((await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!);
+        Assert.Equal(2, f.Engine.Downloads);
+        Assert.Equal(1, f.Engine.Applies);
     }
 }

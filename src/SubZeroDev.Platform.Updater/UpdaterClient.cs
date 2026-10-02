@@ -4,6 +4,7 @@ internal interface IUpdateEngine : IDisposable
 {
     bool IsSupported { get; }
     string? CurrentVersion { get; }
+    bool VerifiesPackageSignatures { get; }
     Task<UpdateCandidate?> CheckAsync(UpdateChannel channel, CancellationToken token);
     Task DownloadAsync(UpdateCandidate candidate, Action<int> progress, CancellationToken token);
     void VerifyCanApply(UpdateCandidate candidate);
@@ -61,7 +62,7 @@ public sealed class UpdaterClient : IUpdaterClient
 #if UPDATER_LOCAL_VALIDATION
         // Compiled only into the local smoke-test package. Never enable for release builds.
         if (Environment.GetEnvironmentVariable("UPDATER_VALIDATION_FEED") is { Length: > 0 } feed)
-            engine = new VelopackEngine(options, sourceFactory: _ => new Velopack.Sources.SimpleFileSource(new(feed)), log: diagnostic);
+            engine = new VelopackEngine(options, sourceFactory: _ => new SignedFileSource(new(feed)), log: diagnostic);
 #endif
         engine ??= new VelopackEngine(options, log: diagnostic);
         var client = new UpdaterClient(options, engine, store, restartCoordinator, preferences, log: diagnostic);
@@ -136,6 +137,8 @@ public sealed class UpdaterClient : IUpdaterClient
             if (origin == CheckOrigin.Automatic && prompt && Preferences.ConsentMode == ConsentMode.InstallAutomatically) {
                 // A staged or applied update finishes first; a newer candidate is offered again after restart.
                 if (Volatile.Read(ref applied) is not null || Volatile.Read(ref pending) is not null) prompt = false;
+                // Without a pinned publisher key, anyone able to write releases could install silently; ask instead.
+                else if (!engine.VerifiesPackageSignatures) Log("category=automatic-install-requires-signing-key");
                 else {
                     // Automatic installs run from host startup; failures are reported in the result, never thrown to the host.
                     try {

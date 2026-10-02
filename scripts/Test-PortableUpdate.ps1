@@ -14,11 +14,17 @@ Expand-Archive -LiteralPath (Get-ChildItem "$baseline/assets/*-Portable.zip").Fu
 $packArguments = @{}
 if ($NuGetConfig) { $packArguments.NuGetConfig = $NuGetConfig }
 $previousControl = $env:UPDATER_PROBE_CONTROL
+$previousSigningKey = $env:UPDATER_PACKAGE_SIGNING_KEY
+# An ephemeral publisher key: the probe pins its public half, so each update must pass signature verification.
+$signer = [Security.Cryptography.ECDsa]::Create([Security.Cryptography.ECCurve+NamedCurves]::nistP256)
+$publicKey = $signer.ExportSubjectPublicKeyInfoPem()
 try {
+    $env:UPDATER_PACKAGE_SIGNING_KEY = $signer.ExportPkcs8PrivateKeyPem()
     foreach ($version in @('1.0.1', '1.0.2')) {
         $next = Join-Path $root $version
         & "$PSScriptRoot/Pack-Application.ps1" -Project tests/UpdaterProbe/UpdaterProbe.csproj -AppId SubZeroDev.UpdaterProbe -MainExe UpdaterProbe.exe -Version $version -ReleaseNotes README.md -OutputDirectory $next @packArguments
-        $control = @{ AppId = 'SubZeroDev.UpdaterProbe'; Repository = 'https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases'; Data = $data; Target = $version; Feed = (Join-Path $next 'assets') }
+        if (-not (Get-ChildItem (Join-Path $next 'assets') -Filter '*-full.nupkg.sig')) { throw "Release $version was not signed." }
+        $control = @{ AppId = 'SubZeroDev.UpdaterProbe'; Repository = 'https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases'; Data = $data; Target = $version; Feed = (Join-Path $next 'assets'); SigningKey = $publicKey }
         $env:UPDATER_PROBE_CONTROL = Join-Path $data 'control.json'
         $control | ConvertTo-Json | Set-Content -LiteralPath $env:UPDATER_PROBE_CONTROL
         $process = Start-Process -FilePath (Join-Path $installation 'SubZeroDev.UpdaterProbe.exe') -WindowStyle Hidden -PassThru
@@ -43,4 +49,8 @@ try {
         if ($fields[0] -ne $expected[$i] -or $fields[1] -ne $expected[$i]) { throw "Run $($i + 1) expected package and binary $($expected[$i]); found $($fields[0]) / $($fields[1])." }
     }
     Write-Output "Portable A -> B -> C passed: $data"
-} finally { $env:UPDATER_PROBE_CONTROL = $previousControl }
+} finally {
+    $env:UPDATER_PROBE_CONTROL = $previousControl
+    $env:UPDATER_PACKAGE_SIGNING_KEY = $previousSigningKey
+    $signer.Dispose()
+}

@@ -101,6 +101,8 @@ SubZeroDev.Platform.Updater.UpdaterOptions.MinimumAutomaticCheckInterval.get -> 
 SubZeroDev.Platform.Updater.UpdaterOptions.MinimumAutomaticCheckInterval.init -> void
 SubZeroDev.Platform.Updater.UpdaterOptions.NetworkTimeout.get -> System.TimeSpan
 SubZeroDev.Platform.Updater.UpdaterOptions.NetworkTimeout.init -> void
+SubZeroDev.Platform.Updater.UpdaterOptions.PackageSigningKey.get -> string?
+SubZeroDev.Platform.Updater.UpdaterOptions.PackageSigningKey.init -> void
 SubZeroDev.Platform.Updater.UpdaterOptions.PublicReleaseRepository.get -> System.Uri!
 SubZeroDev.Platform.Updater.UpdaterOptions.PublicReleaseRepository.init -> void
 SubZeroDev.Platform.Updater.UpdaterOptions.SettingsDirectory.get -> string!

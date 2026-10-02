@@ -11,6 +11,7 @@ param(
     [switch]$SkipPublish
 )
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/PackageSignature.ps1"
 if ($Version -notmatch '^\d+\.\d+\.\d+(-preview\.[1-9]\d*)?$') { throw 'Version must be X.Y.Z or X.Y.Z-preview.N.' }
 $channel = if ($Version.Contains('-preview.')) { 'win-preview' } else { 'win-stable' }
 if (-not $PublishDirectory) { $PublishDirectory = Join-Path $OutputDirectory 'application' }
@@ -42,6 +43,11 @@ foreach ($asset in $feed.Assets) {
     $file = Join-Path $assets $asset.FileName
     if (-not (Test-Path -LiteralPath $file) -or (Get-FileHash -LiteralPath $file).Hash -ne $asset.SHA256) { throw 'Feed hash mismatch.' }
 }
+# Publisher signatures let clients with a pinned PackageSigningKey reject packages from anyone else who can write releases.
+if ($env:UPDATER_PACKAGE_SIGNING_KEY) {
+    New-PackageSignatures $assets $AppId $channel $env:UPDATER_PACKAGE_SIGNING_KEY
+    $files = @(Get-ChildItem -LiteralPath $assets -File | Where-Object Name -ne 'SHA256SUMS')
+} else { Write-Warning 'UPDATER_PACKAGE_SIGNING_KEY is not set; clients that pin a package signing key will reject this release.' }
 $hashes = $files | Sort-Object Name | ForEach-Object { "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name }
 [IO.File]::WriteAllLines((Join-Path $assets 'SHA256SUMS'), $hashes)
 Write-Output "Validated $AppId $Version ($channel): $assets"

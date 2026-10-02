@@ -54,7 +54,8 @@ public sealed record UpdaterOptions(string AppId, Uri PublicReleaseRepository, s
 {
     /// <summary>Minimum elapsed time between automatic network attempts; defaults to fifteen minutes.</summary>
     public TimeSpan MinimumAutomaticCheckInterval { get; init; } = TimeSpan.FromMinutes(15);
-    /// <summary>Timeout for each network request; defaults to thirty seconds.</summary>
+    /// <summary>Maximum wait for a response, and for further data while downloading a package; defaults to thirty seconds.
+    /// A package download may take longer overall while it keeps receiving data.</summary>
     public TimeSpan NetworkTimeout { get; init; } = TimeSpan.FromSeconds(30);
 }
 
@@ -108,6 +109,10 @@ public interface IUpdateRestartCoordinator
 {
     /// <summary>Ask the host to quiesce. Return Defer while settings or critical work are active.</summary>
     Task<RestartDecision> RequestRestartAsync(CancellationToken cancellationToken);
+    /// <summary>The restart failed after RequestRestartAsync was called, including after Ready. Restore detection, tray, and
+    /// instance guard so the running version stays usable; may be called after a partial quiesce, so make it idempotent.
+    /// The staged update remains available to RetryPendingRestartAsync.</summary>
+    Task RestartAbortedAsync();
 }
 /// <summary>UI-independent update operations. Dispose during ordinary shutdown.</summary>
 public interface IUpdaterClient : IAsyncDisposable

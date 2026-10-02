@@ -5,6 +5,7 @@ internal interface IUpdateEngine : IDisposable
     bool IsSupported { get; }
     Task<UpdateCandidate?> CheckAsync(UpdateChannel channel, CancellationToken token);
     Task DownloadAsync(UpdateCandidate candidate, Action<int> progress, CancellationToken token);
+    void VerifyCanApply(UpdateCandidate candidate);
     void Apply(UpdateCandidate candidate);
 }
 
@@ -54,9 +55,9 @@ public sealed class UpdaterClient : IUpdaterClient
 #if UPDATER_LOCAL_VALIDATION
         // Compiled only into the local smoke-test package. Never enable for release builds.
         if (Environment.GetEnvironmentVariable("UPDATER_VALIDATION_FEED") is { Length: > 0 } feed)
-            return new(options, new VelopackEngine(options, sourceFactory: _ => new Velopack.Sources.SimpleFileSource(new(feed))), store, restartCoordinator, preferences, log: diagnostic);
+            return new(options, new VelopackEngine(options, sourceFactory: _ => new Velopack.Sources.SimpleFileSource(new(feed)), log: diagnostic), store, restartCoordinator, preferences, log: diagnostic);
 #endif
-        return new(options, new VelopackEngine(options), store, restartCoordinator, preferences, log: diagnostic);
+        return new(options, new VelopackEngine(options, log: diagnostic), store, restartCoordinator, preferences, log: diagnostic);
     }
 
     /// <inheritdoc />
@@ -103,8 +104,18 @@ public sealed class UpdaterClient : IUpdaterClient
             var result = await task.WaitAsync(cancellationToken).ConfigureAwait(false);
             bool prompt = result.Candidate is { } c && (origin == CheckOrigin.Manual || Preferences.LastOfferedVersion != c.TargetVersion || Preferences.OfferDeferredUntilUtc <= clock.GetUtcNow() || Preferences.OfferDeferredUntilUtc is null);
             if (origin == CheckOrigin.Automatic && result.Candidate is { } candidate && prompt && Preferences.ConsentMode == ConsentMode.InstallAutomatically) {
-                await InstallAsync(candidate, cancellationToken: cancellationToken).ConfigureAwait(false);
-                prompt = false;
+                // A staged or applied update finishes first; a newer candidate is offered again after restart.
+                if (Volatile.Read(ref applied) is not null || Volatile.Read(ref pending) is not null) prompt = false;
+                else {
+                    // Automatic installs run from host startup; failures are reported in the result, never thrown to the host.
+                    try {
+                        await InstallAsync(candidate, cancellationToken: cancellationToken).ConfigureAwait(false);
+                        prompt = false;
+                    } catch (Exception ex) when (ex is not OperationCanceledException) {
+                        Log($"category=automatic-install-failure type={ex.GetType().Name}");
+                        return result with { ShouldPrompt = true, Message = "The update could not be installed automatically. Try installing it manually." };
+                    }
+                }
             }
             return result with { ShouldPrompt = prompt };
         } catch (OperationCanceledException) { return new(CheckOutcomeKind.Cancelled); }
@@ -232,13 +243,29 @@ public sealed class UpdaterClient : IUpdaterClient
     private async Task RestartCoreAsync(CancellationToken token)
     {
         if (pending is not { } candidate) return;
-        if (await restart.RequestRestartAsync(token).ConfigureAwait(false) == RestartDecision.Defer) return;
-        token.ThrowIfCancellationRequested();
+        try { engine.VerifyCanApply(candidate); }
+        catch {
+            // A staged package that cannot be applied is dropped so a later install downloads it again.
+            pending = null;
+            throw;
+        }
+        RestartDecision decision;
+        try { decision = await restart.RequestRestartAsync(token).ConfigureAwait(false); }
+        catch { await RestoreHostAsync().ConfigureAwait(false); throw; }
+        if (decision == RestartDecision.Defer) return;
+        // The host has released its resources, so cancellation no longer applies: apply, or give the host back its resources.
         Publish(new(UpdateStage.Applying, candidate));
-        engine.Apply(candidate);
+        try { engine.Apply(candidate); }
+        catch { await RestoreHostAsync().ConfigureAwait(false); throw; }
         applied = candidate;
         pending = null;
         Publish(new(UpdateStage.Completed, candidate));
+    }
+
+    private async Task RestoreHostAsync()
+    {
+        try { await restart.RestartAbortedAsync().ConfigureAwait(false); }
+        catch (Exception ex) { Log($"category=host-restore-failure type={ex.GetType().Name}"); }
     }
 
     /// <inheritdoc />

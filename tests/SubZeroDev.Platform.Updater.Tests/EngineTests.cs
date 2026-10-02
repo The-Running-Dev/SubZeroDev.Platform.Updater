@@ -43,6 +43,29 @@ public sealed class EngineTests
         Assert.Equal(UpdateChannel.Stable, candidate?.Channel);
     }
 
+    private sealed class InvalidSource : IUpdateSource
+    {
+        public Task<VelopackAssetFeed> GetReleaseFeed(IVelopackLogger logger, string? appId, string channel, Guid? stagingId = null, VelopackAsset? latestLocalRelease = null)
+            => throw new InvalidDataException("Release feed identity, version, hash, or asset is invalid.");
+        public Task DownloadReleaseEntry(IVelopackLogger logger, VelopackAsset releaseEntry, string localFile, Action<int> progress, CancellationToken cancelToken = default)
+            => throw new NotSupportedException();
+    }
+
+    [Fact] public async Task InvalidStreamDoesNotHideValidStream()
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused"),
+            new TestVelopackLocator("Example", "1.0.0", Path.GetTempPath()),
+            stream => stream == UpdateChannel.Stable ? new Source("1.1.0") : new InvalidSource());
+        Assert.Equal("1.1.0", (await engine.CheckAsync(UpdateChannel.Preview, default))?.TargetVersion);
+    }
+
+    [Fact] public async Task InvalidStreamIsReportedWhenNothingIsAvailable()
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused"),
+            new TestVelopackLocator("Example", "1.0.0", Path.GetTempPath()), _ => new InvalidSource());
+        await Assert.ThrowsAsync<InvalidDataException>(() => engine.CheckAsync(UpdateChannel.Stable, default));
+    }
+
     [Fact] public async Task TamperedDownloadIsNotStaged()
     {
         var directory = Path.Combine(Path.GetTempPath(), "updater-integrity-" + Guid.NewGuid());

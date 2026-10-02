@@ -33,6 +33,7 @@ SubZeroDev.Platform.Updater.CheckOutcomeKind.RecentlyChecked = 3 -> SubZeroDev.P
 SubZeroDev.Platform.Updater.CheckOutcomeKind.UnsupportedInstallation = 4 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
 SubZeroDev.Platform.Updater.CheckOutcomeKind.UpdateAvailable = 0 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
 SubZeroDev.Platform.Updater.CheckOutcomeKind.UpToDate = 1 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
+SubZeroDev.Platform.Updater.CheckOutcomeKind.UpdateInProgress = 9 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
 SubZeroDev.Platform.Updater.CheckResult
 SubZeroDev.Platform.Updater.CheckResult.<Clone>$() -> SubZeroDev.Platform.Updater.CheckResult!
 SubZeroDev.Platform.Updater.CheckResult.Candidate.get -> SubZeroDev.Platform.Updater.UpdateCandidate?
@@ -49,12 +50,16 @@ SubZeroDev.Platform.Updater.CheckResult.ShouldPrompt.init -> void
 SubZeroDev.Platform.Updater.ConsentMode
 SubZeroDev.Platform.Updater.ConsentMode.ConfirmEachUpdate = 0 -> SubZeroDev.Platform.Updater.ConsentMode
 SubZeroDev.Platform.Updater.ConsentMode.InstallAutomatically = 1 -> SubZeroDev.Platform.Updater.ConsentMode
+SubZeroDev.Platform.Updater.InstallOutcome
+SubZeroDev.Platform.Updater.InstallOutcome.Deferred = 1 -> SubZeroDev.Platform.Updater.InstallOutcome
+SubZeroDev.Platform.Updater.InstallOutcome.NoPendingUpdate = 2 -> SubZeroDev.Platform.Updater.InstallOutcome
+SubZeroDev.Platform.Updater.InstallOutcome.RestartScheduled = 0 -> SubZeroDev.Platform.Updater.InstallOutcome
 SubZeroDev.Platform.Updater.IUpdaterClient
 SubZeroDev.Platform.Updater.IUpdaterClient.CheckAsync(SubZeroDev.Platform.Updater.CheckOrigin origin, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.CheckResult!>!
 SubZeroDev.Platform.Updater.IUpdaterClient.DeferAsync(SubZeroDev.Platform.Updater.UpdateCandidate! candidate, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
-SubZeroDev.Platform.Updater.IUpdaterClient.InstallAsync(SubZeroDev.Platform.Updater.UpdateCandidate! candidate, bool rememberAutomaticConsent = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+SubZeroDev.Platform.Updater.IUpdaterClient.InstallAsync(SubZeroDev.Platform.Updater.UpdateCandidate! candidate, bool rememberAutomaticConsent = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.InstallOutcome>!
 SubZeroDev.Platform.Updater.IUpdaterClient.Preferences.get -> SubZeroDev.Platform.Updater.UpdaterPreferences!
-SubZeroDev.Platform.Updater.IUpdaterClient.RetryPendingRestartAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+SubZeroDev.Platform.Updater.IUpdaterClient.RetryPendingRestartAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.InstallOutcome>!
 SubZeroDev.Platform.Updater.IUpdaterClient.SavePreferencesAsync(SubZeroDev.Platform.Updater.UpdaterPreferences! preferences, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 SubZeroDev.Platform.Updater.IUpdaterClient.StartAutomaticCheckAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.CheckResult!>!
 SubZeroDev.Platform.Updater.IUpdaterClient.State.get -> SubZeroDev.Platform.Updater.UpdaterState!
@@ -79,9 +84,9 @@ SubZeroDev.Platform.Updater.UpdaterClient
 SubZeroDev.Platform.Updater.UpdaterClient.CheckAsync(SubZeroDev.Platform.Updater.CheckOrigin origin, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.CheckResult!>!
 SubZeroDev.Platform.Updater.UpdaterClient.DeferAsync(SubZeroDev.Platform.Updater.UpdateCandidate! candidate, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 SubZeroDev.Platform.Updater.UpdaterClient.DisposeAsync() -> System.Threading.Tasks.ValueTask
-SubZeroDev.Platform.Updater.UpdaterClient.InstallAsync(SubZeroDev.Platform.Updater.UpdateCandidate! candidate, bool rememberAutomaticConsent = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+SubZeroDev.Platform.Updater.UpdaterClient.InstallAsync(SubZeroDev.Platform.Updater.UpdateCandidate! candidate, bool rememberAutomaticConsent = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.InstallOutcome>!
 SubZeroDev.Platform.Updater.UpdaterClient.Preferences.get -> SubZeroDev.Platform.Updater.UpdaterPreferences!
-SubZeroDev.Platform.Updater.UpdaterClient.RetryPendingRestartAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+SubZeroDev.Platform.Updater.UpdaterClient.RetryPendingRestartAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.InstallOutcome>!
 SubZeroDev.Platform.Updater.UpdaterClient.SavePreferencesAsync(SubZeroDev.Platform.Updater.UpdaterPreferences! value, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 SubZeroDev.Platform.Updater.UpdaterClient.StartAutomaticCheckAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SubZeroDev.Platform.Updater.CheckResult!>!
 SubZeroDev.Platform.Updater.UpdaterClient.State.get -> SubZeroDev.Platform.Updater.UpdaterState!
@@ -118,6 +123,8 @@ SubZeroDev.Platform.Updater.UpdaterPreferences.LastSuccessfulCheckUtc.get -> Sys
 SubZeroDev.Platform.Updater.UpdaterPreferences.LastSuccessfulCheckUtc.init -> void
 SubZeroDev.Platform.Updater.UpdaterPreferences.OfferDeferredUntilUtc.get -> System.DateTimeOffset?
 SubZeroDev.Platform.Updater.UpdaterPreferences.OfferDeferredUntilUtc.init -> void
+SubZeroDev.Platform.Updater.UpdaterPreferences.PendingInstallVersion.get -> string?
+SubZeroDev.Platform.Updater.UpdaterPreferences.PendingInstallVersion.init -> void
 SubZeroDev.Platform.Updater.UpdaterPreferences.SchemaVersion.get -> int
 SubZeroDev.Platform.Updater.UpdaterPreferences.SchemaVersion.init -> void
 SubZeroDev.Platform.Updater.UpdaterPreferences.UpdaterPreferences() -> void

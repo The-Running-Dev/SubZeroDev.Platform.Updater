@@ -27,6 +27,7 @@ jobs:
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
+          if (Get-ChildItem artifacts/packages/*local-validation*) { throw 'Local validation packages must never be published.' }
           if (-not $env:NUGET_API_KEY) { throw 'Configure NUGET_API_KEY in the nuget environment or replace this step with owner-configured trusted publishing.' }
           dotnet nuget push artifacts/packages/*.nupkg --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json
           if ($LASTEXITCODE) { throw 'NuGet publication failed.' }

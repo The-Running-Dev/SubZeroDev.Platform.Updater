@@ -39,6 +39,7 @@ public sealed class UpdaterTests
     private sealed class Engine : IUpdateEngine
     {
         public bool IsSupported { get; set; } = true;
+        public string? CurrentVersion { get; set; } = "1.0.0";
         internal int Checks, Downloads, Applies;
         internal Exception? ApplyError, VerifyError;
         internal UpdateChannel Channel;
@@ -76,9 +77,11 @@ public sealed class UpdaterTests
         internal readonly Engine Engine = new();
         internal readonly Restart Restart = new();
         internal readonly UpdaterClient Client;
-        internal Fixture(UpdaterPreferences? preferences = null) {
+        internal Fixture(UpdaterPreferences? preferences = null, TimeSpan? shutdown = null) {
             Store.Value = preferences ?? new();
-            Client = new(new("Example", new("https://github.com/example/app"), "unused"), Engine, Store, Restart, Store.Value, Clock);
+            Client = new(new("Example", new("https://github.com/example/app"), "unused"), Engine, Store, Restart, Store.Value, Clock) {
+                ShutdownTimeout = shutdown ?? TimeSpan.FromSeconds(10)
+            };
         }
         public ValueTask DisposeAsync() => Client.DisposeAsync();
     }
@@ -295,5 +298,88 @@ public sealed class UpdaterTests
         await f.Client.InstallAsync((await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!);
         Assert.Equal(2, f.Engine.Downloads);
         Assert.Equal(1, f.Engine.Applies);
+    }
+    [Fact] public async Task BookkeepingSaveFailureKeepsFoundUpdateAndThrottles() {
+        await using var f = new Fixture(); f.Store.Fail = true;
+        var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.Equal(CheckOutcomeKind.UpdateAvailable, result.Kind);
+        Assert.True(result.ShouldPrompt);
+        Assert.Equal(CheckOutcomeKind.RecentlyChecked, (await f.Client.StartAutomaticCheckAsync()).Kind);
+        Assert.Equal(1, f.Engine.Checks);
+    }
+    [Fact] public async Task CheckDuringInstallReportsProgressInsteadOfWaiting() {
+        await using var f = new Fixture();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<RestartDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Restart.Respond = _ => { entered.TrySetResult(); return release.Task; };
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        var install = f.Client.InstallAsync(candidate);
+        await entered.Task;
+        var result = await f.Client.CheckAsync(CheckOrigin.Manual).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(CheckOutcomeKind.UpdateInProgress, result.Kind);
+        Assert.Same(candidate, result.Candidate);
+        Assert.False(result.ShouldPrompt);
+        Assert.Equal(1, f.Engine.Checks);
+        release.SetResult(RestartDecision.Defer);
+        Assert.Equal(InstallOutcome.Deferred, await install);
+    }
+    [Fact] public async Task StagedUpdateIsNotReofferedAsAvailable() {
+        await using var f = new Fixture();
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        Assert.Equal(InstallOutcome.Deferred, await f.Client.InstallAsync(candidate));
+        f.Engine.Candidate = CandidateFor("2.1.0");
+        var manual = await f.Client.CheckAsync(CheckOrigin.Manual);
+        Assert.Equal(CheckOutcomeKind.UpdateInProgress, manual.Kind);
+        Assert.Same(candidate, manual.Candidate);
+        Assert.True(manual.ShouldPrompt);
+        Assert.False((await f.Client.StartAutomaticCheckAsync()).ShouldPrompt);
+        Assert.Equal(1, f.Engine.Checks);
+        Assert.Equal(UpdateStage.AwaitingRestart, f.Client.State.Stage);
+        f.Restart.Decision = RestartDecision.Ready;
+        Assert.Equal(InstallOutcome.RestartScheduled, await f.Client.InstallAsync(manual.Candidate!));
+    }
+    [Fact] public async Task InstallAndRetryReportWhatHappened() {
+        await using var f = new Fixture();
+        Assert.Equal(InstallOutcome.NoPendingUpdate, await f.Client.RetryPendingRestartAsync());
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        Assert.Equal(InstallOutcome.Deferred, await f.Client.InstallAsync(candidate));
+        Assert.Equal(InstallOutcome.Deferred, await f.Client.RetryPendingRestartAsync());
+        f.Restart.Decision = RestartDecision.Ready;
+        Assert.Equal(InstallOutcome.RestartScheduled, await f.Client.RetryPendingRestartAsync());
+        Assert.Equal(InstallOutcome.RestartScheduled, await f.Client.RetryPendingRestartAsync());
+        Assert.Equal(1, f.Engine.Applies);
+    }
+    [Fact] public async Task ScheduledInstallIsConfirmedByNextStart() {
+        await using (var first = new Fixture()) {
+            first.Restart.Decision = RestartDecision.Ready;
+            await first.Client.InstallAsync((await first.Client.CheckAsync(CheckOrigin.Manual)).Candidate!);
+            Assert.Equal("2.0.0", first.Store.Value.PendingInstallVersion);
+        }
+        await using var f = new Fixture(new() { PendingInstallVersion = "2.0.0" });
+        f.Engine.CurrentVersion = "2.0.0";
+        await f.Client.VerifyLastInstallAsync();
+        Assert.Null(f.Store.Value.PendingInstallVersion);
+        Assert.Equal(UpdateStage.Idle, f.Client.State.Stage);
+    }
+    [Fact] public async Task UpdateThatDidNotApplyIsReportedAndNotRetriedAutomatically() {
+        await using var f = new Fixture(new() { PendingInstallVersion = "2.0.0", ConsentMode = ConsentMode.InstallAutomatically });
+        await f.Client.VerifyLastInstallAsync();
+        Assert.Equal(UpdateStage.Failed, f.Client.State.Stage);
+        Assert.Null(f.Store.Value.PendingInstallVersion);
+        var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.False(result.ShouldPrompt);
+        Assert.Equal(0, f.Engine.Downloads);
+        Assert.True((await f.Client.CheckAsync(CheckOrigin.Manual)).ShouldPrompt);
+    }
+    [Fact] public async Task DisposalDoesNotHangOnUnresponsiveHost() {
+        var f = new Fixture(shutdown: TimeSpan.FromMilliseconds(200));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Restart.Respond = _ => { entered.TrySetResult(); return new TaskCompletionSource<RestartDecision>().Task; };
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        _ = f.Client.InstallAsync(candidate);
+        await entered.Task;
+        await f.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Throws<ObjectDisposedException>(() => { _ = f.Client.InstallAsync(candidate); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = f.Client.RetryPendingRestartAsync(); });
     }
 }

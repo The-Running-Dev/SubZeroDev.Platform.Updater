@@ -9,6 +9,18 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
   </PropertyGroup>
+  <!-- Local smoke tests only: -p:UpdaterLocalValidation=true compiles the UPDATER_VALIDATION_FEED hook
+       and marks the package version so the build cannot pass for a release package. -->
+  <PropertyGroup Condition="'$(UpdaterLocalValidation)' == 'true'">
+    <DefineConstants>$(DefineConstants);UPDATER_LOCAL_VALIDATION</DefineConstants>
+    <Version>$(Version)-local-validation</Version>
+  </PropertyGroup>
+  <Target Name="GuardLocalValidation" BeforeTargets="CoreCompile;GenerateNuspec">
+    <Error Condition="$(DefineConstants.Contains('UPDATER_LOCAL_VALIDATION')) and '$(UpdaterLocalValidation)' != 'true'"
+           Text="Define UPDATER_LOCAL_VALIDATION only through -p:UpdaterLocalValidation=true." />
+    <Error Condition="'$(UpdaterLocalValidation)' == 'true' and !$(PackageVersion.EndsWith('-local-validation'))"
+           Text="Local validation builds must keep the -local-validation package version; do not override Version or PackageVersion." />
+  </Target>
   <ItemGroup>
     <PackageReference Include="Velopack" />
     <PackageReference Include="Microsoft.CodeAnalysis.PublicApiAnalyzers" PrivateAssets="all" />

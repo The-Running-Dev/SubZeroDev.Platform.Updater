@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$BaselineDirectory = 'artifacts/probe', [string]$OutputDirectory = 'artifacts/portable-smoke')
+param([string]$BaselineDirectory = 'artifacts/probe', [string]$OutputDirectory = 'artifacts/portable-smoke', [string]$NuGetConfig)
 $ErrorActionPreference = 'Stop'
 if (Test-Path $OutputDirectory) { throw 'Use a fresh smoke output directory.' }
 $root = [IO.Path]::GetFullPath($OutputDirectory)
@@ -10,11 +10,14 @@ Set-Content -LiteralPath (Join-Path $data 'config.json') -Value '{"sentinel":"pr
 Set-Content -LiteralPath (Join-Path $data 'diagnostics.log') -Value 'preserve-log'
 $baseline = [IO.Path]::GetFullPath($BaselineDirectory)
 Expand-Archive -LiteralPath (Get-ChildItem "$baseline/assets/*-Portable.zip").FullName -DestinationPath $installation
+# Each version is a real publish so the test proves the relaunched binary changed, not only its package metadata.
+$packArguments = @{}
+if ($NuGetConfig) { $packArguments.NuGetConfig = $NuGetConfig }
 $previousControl = $env:UPDATER_PROBE_CONTROL
 try {
     foreach ($version in @('1.0.1', '1.0.2')) {
         $next = Join-Path $root $version
-        & "$PSScriptRoot/Pack-Application.ps1" -Project tests/UpdaterProbe/UpdaterProbe.csproj -AppId SubZeroDev.UpdaterProbe -MainExe UpdaterProbe.exe -Version $version -ReleaseNotes README.md -OutputDirectory $next -PublishDirectory "$baseline/application" -SkipPublish
+        & "$PSScriptRoot/Pack-Application.ps1" -Project tests/UpdaterProbe/UpdaterProbe.csproj -AppId SubZeroDev.UpdaterProbe -MainExe UpdaterProbe.exe -Version $version -ReleaseNotes README.md -OutputDirectory $next @packArguments
         $control = @{ AppId = 'SubZeroDev.UpdaterProbe'; Repository = 'https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases'; Data = $data; Target = $version; Feed = (Join-Path $next 'assets') }
         $env:UPDATER_PROBE_CONTROL = Join-Path $data 'control.json'
         $control | ConvertTo-Json | Set-Content -LiteralPath $env:UPDATER_PROBE_CONTROL
@@ -30,8 +33,14 @@ try {
         if ((Get-Content "$data/config.json" -Raw) -notmatch 'preserve-config' -or (Get-Content "$data/diagnostics.log" -Raw) -notmatch 'preserve-log') { throw 'Application data was replaced.' }
         $prefs = Get-Content "$data/updater.json" -Raw | ConvertFrom-Json
         if ($prefs.consentMode -ne 'installAutomatically') { throw 'Consent was not retained.' }
+        if ($null -ne $prefs.pendingInstallVersion) { throw "Update to $version was not confirmed by the relaunched process." }
     }
     $runs = @(Get-Content "$data/runs.log")
-    if ($runs.Count -ne 4 -or $runs[0] -notlike '1.0.0|*' -or $runs[1] -notlike '1.0.1|*' -or $runs[2] -notlike '1.0.1|*' -or $runs[3] -notlike '1.0.2|*') { throw 'Expected one relaunch per update.' }
+    $expected = @('1.0.0', '1.0.1', '1.0.1', '1.0.2')
+    if ($runs.Count -ne $expected.Count) { throw "Expected one relaunch per update; runs.log has $($runs.Count) entries." }
+    for ($i = 0; $i -lt $expected.Count; $i++) {
+        $fields = $runs[$i].Split('|')
+        if ($fields[0] -ne $expected[$i] -or $fields[1] -ne $expected[$i]) { throw "Run $($i + 1) expected package and binary $($expected[$i]); found $($fields[0]) / $($fields[1])." }
+    }
     Write-Output "Portable A -> B -> C passed: $data"
 } finally { $env:UPDATER_PROBE_CONTROL = $previousControl }

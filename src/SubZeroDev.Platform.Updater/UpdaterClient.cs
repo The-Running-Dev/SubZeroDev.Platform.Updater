@@ -197,6 +197,7 @@ public sealed class UpdaterClient : IUpdaterClient
         catch (Exception ex) {
             var kind = ex switch {
                 HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests } => CheckOutcomeKind.RateLimited,
+                RepositoryNotFoundException => CheckOutcomeKind.RepositoryNotFound,
                 HttpRequestException or TimeoutException => CheckOutcomeKind.NetworkUnavailable,
                 _ => CheckOutcomeKind.InvalidRelease
             };
@@ -208,8 +209,7 @@ public sealed class UpdaterClient : IUpdaterClient
             // Exception text can carry local paths and server detail, so users only see these fixed messages.
             var message = kind switch {
                 CheckOutcomeKind.RateLimited => "GitHub is limiting requests right now. Try again later.",
-                CheckOutcomeKind.NetworkUnavailable when ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.NotFound } =>
-                    "The release repository was not found. It may have been renamed or made private.",
+                CheckOutcomeKind.RepositoryNotFound => "The release repository was not found. It may have been renamed or made private.",
                 CheckOutcomeKind.NetworkUnavailable => "GitHub could not be reached. Check your connection and try again.",
                 _ => "The latest release could not be verified, so it was not used."
             };

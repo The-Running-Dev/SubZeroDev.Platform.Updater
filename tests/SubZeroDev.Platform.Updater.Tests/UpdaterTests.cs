@@ -408,10 +408,13 @@ public sealed class UpdaterTests
     }
     [Fact] public async Task MissingRepositoryIsReportedAsNotFound() {
         await using var f = new Fixture();
-        f.Engine.Error = new HttpRequestException("Not found", null, HttpStatusCode.NotFound);
+        f.Engine.Error = new RepositoryNotFoundException(new HttpRequestException("Not found", null, HttpStatusCode.NotFound));
         var result = await f.Client.CheckAsync(CheckOrigin.Manual);
-        Assert.Equal(CheckOutcomeKind.NetworkUnavailable, result.Kind);
+        Assert.Equal(CheckOutcomeKind.RepositoryNotFound, result.Kind);
         Assert.Contains("not found", result.Message);
+        // A missing asset inside an existing repository is not a missing repository.
+        f.Engine.Error = new HttpRequestException("Not found", null, HttpStatusCode.NotFound);
+        Assert.Equal(CheckOutcomeKind.NetworkUnavailable, (await f.Client.CheckAsync(CheckOrigin.Manual)).Kind);
     }
     [Fact] public async Task RateLimitBacksOffAutomaticChecksForRetryAfterButNotManualOnes() {
         await using var f = new Fixture();

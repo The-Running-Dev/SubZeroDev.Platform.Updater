@@ -22,9 +22,10 @@ public sealed class GithubFeedTests
         public async Task<string> DownloadString(string url, IDictionary<string, string>? headers = null, double timeout = 30) => Encoding.UTF8.GetString(await DownloadBytes(url, headers, timeout));
         public Task DownloadFile(string url, string targetFile, Action<int> progress, IDictionary<string, string>? headers = null, double timeout = 30, CancellationToken cancelToken = default) => throw new NotImplementedException();
     }
-    private static object Release(string tag, bool preview = false, bool draft = false, bool packagePresent = true) => new {
+    private static object Release(string tag, bool preview = false, bool draft = false, bool packagePresent = true, bool signed = false) => new {
         tag_name = tag, prerelease = preview, draft, published_at = "2026-10-01T00:00:00Z",
         assets = (packagePresent ? new[] { "releases.win-stable.json", "releases.win-preview.json", "Example-full.nupkg" } : ["releases.win-stable.json"])
+            .Concat(signed ? ["Example-full.nupkg.sig"] : Array.Empty<string>())
             .Select(name => new { name, browser_download_url = $"https://github.com/example/app/releases/download/{tag}/{name}" })
     };
     private static string Feed(string version, string id = "Example", string? hash = null, string file = "Example-full.nupkg") => JsonSerializer.Serialize(new { Assets = new[] {
@@ -115,6 +116,21 @@ public sealed class GithubFeedTests
         foreach (var tag in tags) d.Responses[$"https://github.com/example/app/releases/download/{tag}/releases.win-stable.json"] = Feed(tag[1..], hash: "bad");
         await Assert.ThrowsAsync<InvalidDataException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
         Assert.Equal(6, d.Requests.Count);
+    }
+
+    [Fact] public async Task SignatureIsReadFromTheSameReleaseAndAbsentSignatureIsNull()
+    {
+        var d = new Downloader();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v1.2.0", signed: true) });
+        d.Responses["https://github.com/example/app/releases/download/v1.2.0/releases.win-stable.json"] = Feed("1.2.0");
+        d.Responses["https://github.com/example/app/releases/download/v1.2.0/Example-full.nupkg.sig"] = "c2lnbmF0dXJl";
+        var source = Source(d);
+        var asset = Assert.Single((await source.GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets);
+        Assert.Equal("c2lnbmF0dXJl", Encoding.UTF8.GetString((await source.GetSignatureAsync(asset))!));
+
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v1.2.0") });
+        source = Source(d);
+        Assert.Null(await source.GetSignatureAsync(Assert.Single((await source.GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets)));
     }
 
     private sealed class Handler(Func<Stream> body) : HttpMessageHandler

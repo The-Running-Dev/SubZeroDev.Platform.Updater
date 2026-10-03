@@ -67,6 +67,11 @@ public sealed record UpdaterOptions(string AppId, Uri PublicReleaseRepository, s
     /// <summary>Maximum wait for a response, and for further data while downloading a package; defaults to thirty seconds.
     /// A package download may take longer overall while it keeps receiving data.</summary>
     public TimeSpan NetworkTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>The publisher's ECDSA P-256 public key, as PEM or base64 SubjectPublicKeyInfo. When set, every full package
+    /// must carry a valid signature from this key before it is offered. When null, packages are checked only against the
+    /// SHA-256 in their own release, and InstallAutomatically consent still asks before each installation.</summary>
+    /// <exception cref="ArgumentException">The value is not an ECDSA P-256 public key.</exception>
+    public string? PackageSigningKey { get; init => field = value is null ? null : PackageSignature.Validate(value); }
 }
 
 /// <summary>Versioned, per-user preferences. Copies are immutable.</summary>

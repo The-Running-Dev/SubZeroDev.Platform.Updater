@@ -40,6 +40,7 @@ public sealed class UpdaterTests
     {
         public bool IsSupported { get; set; } = true;
         public string? CurrentVersion { get; set; } = "1.0.0";
+        public bool VerifiesPackageSignatures { get; set; } = true;
         internal int Checks, Downloads, Applies;
         internal Exception? ApplyError, VerifyError;
         internal UpdateChannel Channel;
@@ -144,6 +145,15 @@ public sealed class UpdaterTests
         Assert.False((await f.Client.StartAutomaticCheckAsync()).ShouldPrompt);
         Assert.Equal(1, f.Engine.Downloads);
         Assert.Equal(UpdateStage.AwaitingRestart, f.Client.State.Stage);
+    }
+    [Fact] public async Task AutomaticConsentPromptsWhenPackagesCannotBeAuthenticated() {
+        await using var f = new Fixture(new() { ConsentMode = ConsentMode.InstallAutomatically });
+        f.Engine.VerifiesPackageSignatures = false;
+        var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.True(result.ShouldPrompt);
+        Assert.Equal("2.0.0", result.Candidate?.TargetVersion);
+        Assert.Equal(0, f.Engine.Downloads);
+        Assert.Equal(ConsentMode.InstallAutomatically, f.Store.Value.ConsentMode);
     }
     [Fact] public async Task RepeatedInstallRequestsApplyCandidateOnlyOnce() {
         await using var f = new Fixture();

@@ -392,4 +392,89 @@ public sealed class UpdaterTests
         Assert.Throws<ObjectDisposedException>(() => { _ = f.Client.InstallAsync(candidate); });
         Assert.Throws<ObjectDisposedException>(() => { _ = f.Client.RetryPendingRestartAsync(); });
     }
+    [Fact] public async Task UsersOnlySeeFixedMessagesNeverExceptionText() {
+        await using var f = new Fixture();
+        f.Engine.Error = new IOException(@"C:\Users\someone\secret\updater.json is locked");
+        var check = await f.Client.CheckAsync(CheckOrigin.Manual);
+        Assert.DoesNotContain("secret", check.Message);
+        Assert.DoesNotContain("secret", f.Client.State.Message);
+        f.Engine.Error = null;
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        f.Engine.ApplyError = new IOException(@"C:\Users\someone\secret\Update.exe");
+        f.Restart.Decision = RestartDecision.Ready;
+        await Assert.ThrowsAsync<IOException>(() => f.Client.InstallAsync(candidate));
+        Assert.Equal(UpdateStage.Failed, f.Client.State.Stage);
+        Assert.DoesNotContain("secret", f.Client.State.Message);
+    }
+    [Fact] public async Task MissingRepositoryIsReportedAsNotFound() {
+        await using var f = new Fixture();
+        f.Engine.Error = new HttpRequestException("Not found", null, HttpStatusCode.NotFound);
+        var result = await f.Client.CheckAsync(CheckOrigin.Manual);
+        Assert.Equal(CheckOutcomeKind.NetworkUnavailable, result.Kind);
+        Assert.Contains("not found", result.Message);
+    }
+    [Fact] public async Task RateLimitBacksOffAutomaticChecksForRetryAfterButNotManualOnes() {
+        await using var f = new Fixture();
+        f.Engine.Error = new RateLimitedException("limited", HttpStatusCode.TooManyRequests, TimeSpan.FromMinutes(45));
+        Assert.Equal(CheckOutcomeKind.RateLimited, (await f.Client.StartAutomaticCheckAsync()).Kind);
+        f.Clock.Now += TimeSpan.FromMinutes(16);
+        Assert.Equal(CheckOutcomeKind.RecentlyChecked, (await f.Client.StartAutomaticCheckAsync()).Kind);
+        Assert.Equal(1, f.Engine.Checks);
+        Assert.Equal(CheckOutcomeKind.RateLimited, (await f.Client.CheckAsync(CheckOrigin.Manual)).Kind);
+        f.Engine.Error = null;
+        f.Clock.Now += TimeSpan.FromMinutes(46);
+        Assert.Equal(CheckOutcomeKind.UpdateAvailable, (await f.Client.StartAutomaticCheckAsync()).Kind);
+    }
+    [Fact] public async Task RateLimitWithoutRetryAfterStillWaitsTheNormalInterval() {
+        await using var f = new Fixture();
+        f.Engine.Error = new RateLimitedException("limited", HttpStatusCode.Forbidden, null);
+        await f.Client.StartAutomaticCheckAsync();
+        f.Clock.Now += TimeSpan.FromMinutes(14);
+        Assert.Equal(CheckOutcomeKind.RecentlyChecked, (await f.Client.StartAutomaticCheckAsync()).Kind);
+        f.Clock.Now += TimeSpan.FromMinutes(2);
+        f.Engine.Error = null;
+        Assert.Equal(CheckOutcomeKind.UpdateAvailable, (await f.Client.StartAutomaticCheckAsync()).Kind);
+    }
+    [Fact] public async Task OnlyRecentOffersStayInstallable() {
+        await using var f = new Fixture();
+        var first = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        for (int i = 0; i < 4; i++) { f.Engine.Candidate = CandidateFor("2.0." + (i + 1)); await f.Client.CheckAsync(CheckOrigin.Manual); }
+        await Assert.ThrowsAsync<ArgumentException>(() => f.Client.DeferAsync(first));
+        await f.Client.DeferAsync(f.Engine.Candidate!);
+    }
+    [Fact] public async Task GitSuffixedRepositoryIsRejected() {
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        await Assert.ThrowsAsync<ArgumentException>(() => UpdaterClient.CreateAsync(new("Example", new("https://github.com/example/app.git"), directory), new Restart()));
+        Assert.False(Directory.Exists(directory));
+    }
+    [Fact] public async Task NewerPreferencesFileIsReadLeniently() {
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, "updater.json");
+        try {
+            await File.WriteAllTextAsync(path, """{"schemaVersion":2,"checkAutomatically":false,"channel":"preview","consentMode":"someFutureMode","futureField":{"a":1}}""");
+            var store = new PreferencesStore(directory, null);
+            var loaded = await store.LoadAsync(default);
+            Assert.Equal(2, loaded.SchemaVersion);
+            Assert.False(loaded.CheckAutomatically);
+            Assert.Equal(UpdateChannel.Preview, loaded.Channel);
+            Assert.Equal(ConsentMode.ConfirmEachUpdate, loaded.ConsentMode);
+            await store.SaveAsync(loaded with { Channel = UpdateChannel.Stable }, default);
+            var saved = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+            Assert.Equal(2, (int)saved["schemaVersion"]!);
+            Assert.Equal(1, (int)saved["futureField"]!["a"]!);
+            Assert.Equal("stable", (string)saved["channel"]!);
+        } finally { Directory.Delete(directory, true); }
+    }
+    [Fact] public async Task UnknownFieldsInCurrentSchemaSurviveSaves() {
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, "updater.json");
+        try {
+            await File.WriteAllTextAsync(path, """{"schemaVersion":1,"extra":"keep"}""");
+            var store = new PreferencesStore(directory, null);
+            await store.SaveAsync(await store.LoadAsync(default) with { CheckAutomatically = false }, default);
+            Assert.Contains("\"extra\"", await File.ReadAllTextAsync(path));
+        } finally { Directory.Delete(directory, true); }
+    }
 }

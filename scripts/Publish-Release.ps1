@@ -4,7 +4,7 @@ param([Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][string]$
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/PackageSignature.ps1"
 $tag = "v$Version"
-if ($Version -notmatch '^\d+\.\d+\.\d+(-preview\.[1-9]\d*)?$') { throw 'Invalid release version.' }
+if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-preview\.[1-9]\d*)?$') { throw 'Invalid release version.' }
 $channel = if ($Version.Contains('-preview.')) { 'win-preview' } else { 'win-stable' }
 foreach ($pattern in @('*-Portable.zip', '*-Setup.exe', '*.msi', '*-full.nupkg', "releases.$channel.json", 'SHA256SUMS', 'RELEASE-NOTES.md')) {
     if (-not (Get-ChildItem -LiteralPath $AssetsDirectory -File | Where-Object Name -like $pattern)) { throw "Missing $pattern" }
@@ -24,7 +24,7 @@ if ($PackageSigningKey) {
 $existing = gh release view $tag --repo $Repository 2>&1
 if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists." }
 if ("$existing" -notmatch 'release not found') { throw "Could not confirm that $tag is absent: $existing" }
-$argsList = @('release', 'create', $tag, '--repo', $Repository, '--draft', '--title', "$Repository $tag", '--notes-file', (Join-Path $AssetsDirectory 'RELEASE-NOTES.md'))
+$argsList = @('release', 'create', $tag, '--repo', $Repository, '--draft', '--title', $tag, '--notes-file', (Join-Path $AssetsDirectory 'RELEASE-NOTES.md'))
 if ($channel -eq 'win-preview') { $argsList += '--prerelease' }
 gh @argsList
 if ($LASTEXITCODE) { throw 'Could not create draft release.' }

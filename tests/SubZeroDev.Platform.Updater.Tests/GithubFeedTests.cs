@@ -178,4 +178,100 @@ public sealed class GithubFeedTests
             await Assert.ThrowsAsync<TimeoutException>(() => downloader.DownloadFile("https://github.com/example/app/releases/download/v1.1.0/Example-full.nupkg", file, _ => { }));
         } finally { File.Delete(file); }
     }
+
+    private sealed class Responder(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        internal readonly List<Uri> Requests = [];
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request.RequestUri!);
+            return Task.FromResult(respond(request));
+        }
+    }
+    private static HttpResponseMessage Redirect(string location) => new(System.Net.HttpStatusCode.Redirect) { Headers = { Location = new(location) } };
+    private const string FeedUrl = "https://github.com/example/app/releases/download/v1.1.0/releases.win-stable.json";
+    private const string PackageUrl = "https://github.com/example/app/releases/download/v1.1.0/Example-full.nupkg";
+
+    [Fact] public async Task RedirectsStayOnGithubHosts()
+    {
+        var handler = new Responder(r => r.RequestUri!.Host == "github.com"
+            ? Redirect("https://objects.githubusercontent.com/package")
+            : new(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) });
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), handler);
+        Assert.Equal(3, (await downloader.DownloadBytes(FeedUrl)).Length);
+        Assert.Equal(2, handler.Requests.Count);
+
+        var hostile = new Responder(_ => Redirect("https://evil.example.com/package"));
+        using var strict = new PublicDownloader(TimeSpan.FromSeconds(5), hostile);
+        await Assert.ThrowsAsync<InvalidDataException>(() => strict.DownloadBytes(FeedUrl));
+        Assert.Single(hostile.Requests);
+
+        using var downgrade = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => Redirect("http://objects.githubusercontent.com/package")));
+        await Assert.ThrowsAsync<InvalidDataException>(() => downgrade.DownloadBytes(FeedUrl));
+    }
+
+    [Fact] public async Task EndlessRedirectsAreStopped()
+    {
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => Redirect("https://github.com/loop")));
+        await Assert.ThrowsAsync<InvalidDataException>(() => downloader.DownloadBytes(FeedUrl));
+    }
+
+    [Theory]
+    [InlineData(429, "120", 120)]
+    [InlineData(403, null, null)]
+    public async Task RateLimitCarriesRetryAfter(int status, string? header, int? seconds)
+    {
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => {
+            var response = new HttpResponseMessage((System.Net.HttpStatusCode)status);
+            if (header is not null) response.Headers.TryAddWithoutValidation("Retry-After", header);
+            return response;
+        }));
+        var error = await Assert.ThrowsAsync<RateLimitedException>(() => downloader.DownloadBytes(FeedUrl));
+        Assert.Equal(seconds is null ? null : TimeSpan.FromSeconds(seconds.Value), error.RetryAfter);
+        Assert.Equal((System.Net.HttpStatusCode)status, error.StatusCode);
+    }
+
+    [Fact] public async Task NotFoundIsNotARateLimit()
+    {
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => new(System.Net.HttpStatusCode.NotFound)));
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => downloader.DownloadBytes(FeedUrl));
+        Assert.IsNotType<RateLimitedException>(error);
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, error.StatusCode);
+    }
+
+    [Fact] public async Task DownloadsLargerThanDeclaredAreRefused()
+    {
+        string file = Path.Combine(Path.GetTempPath(), "updater-download-" + Guid.NewGuid());
+        try {
+            using var streamed = new PublicDownloader(TimeSpan.FromSeconds(5), new Handler(() => new TrickleStream(8, TimeSpan.Zero))) { MaximumDownloadBytes = 4 };
+            await Assert.ThrowsAsync<InvalidDataException>(() => streamed.DownloadFile(PackageUrl, file, _ => { }));
+
+            using var declared = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => new(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[64]) })) { MaximumDownloadBytes = 8 };
+            await Assert.ThrowsAsync<InvalidDataException>(() => declared.DownloadFile(PackageUrl, file, _ => { }));
+
+            using var exact = new PublicDownloader(TimeSpan.FromSeconds(5), new Handler(() => new TrickleStream(8, TimeSpan.Zero))) { MaximumDownloadBytes = 8 };
+            await exact.DownloadFile(PackageUrl, file, _ => { });
+            Assert.Equal(8, new FileInfo(file).Length);
+        } finally { File.Delete(file); }
+    }
+
+    [Fact] public async Task UserAgentCarriesTheLibraryVersion()
+    {
+        string? agent = null;
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(r => {
+            agent = r.Headers.UserAgent.ToString();
+            return new(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent([1]) };
+        }));
+        await downloader.DownloadBytes(FeedUrl);
+        Assert.StartsWith("SubZeroDev.Platform.Updater/", agent);
+        Assert.NotEqual("SubZeroDev.Platform.Updater/0", agent);
+    }
+
+    [Fact] public async Task TagsWithLeadingZerosAreSkipped()
+    {
+        var d = new Downloader();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v01.2.0"), Release("v1.02.0"), Release("v1.1.0") });
+        d.Responses["https://github.com/example/app/releases/download/v1.1.0/releases.win-stable.json"] = Feed("1.1.0");
+        Assert.Equal("1.1.0", Assert.Single((await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets).Version.ToString());
+    }
 }

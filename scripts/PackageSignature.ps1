@@ -1,4 +1,4 @@
-# Dot-source this file. Signatures must match src/SubZeroDev.Platform.Updater/PackageSignature.cs; change both together.
+# Dot-source this file. Signatures must match src/SubZeroDev.Platform.Updater/Velopack/PackageSignature.cs; change both together.
 using namespace System.Security.Cryptography
 
 function Get-PackageSignatureMessage([string]$AppId, $Asset) {

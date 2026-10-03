@@ -40,5 +40,10 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
         run: |
-          dotnet nuget push artifacts/packages/*.nupkg --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json
-          if ($LASTEXITCODE) { throw 'NuGet publication failed.' }
+          # dotnet nuget push does not expand this wildcard on Windows; the .snupkg beside each package is pushed with it.
+          $packages = @(Get-ChildItem artifacts/packages/*.nupkg)
+          if (-not $packages) { throw 'No package to publish.' }
+          foreach ($package in $packages) {
+            dotnet nuget push $package.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json
+            if ($LASTEXITCODE) { throw 'NuGet publication failed.' }
+          }

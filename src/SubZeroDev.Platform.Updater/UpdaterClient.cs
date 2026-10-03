@@ -3,6 +3,8 @@ namespace SubZeroDev.Platform.Updater;
 internal interface IUpdateEngine : IDisposable
 {
     bool IsSupported { get; }
+    string? CurrentVersion { get; }
+    bool VerifiesPackageSignatures { get; }
     Task<UpdateCandidate?> CheckAsync(UpdateChannel channel, CancellationToken token);
     Task DownloadAsync(UpdateCandidate candidate, Action<int> progress, CancellationToken token);
     void VerifyCanApply(UpdateCandidate candidate);
@@ -23,9 +25,10 @@ public sealed class UpdaterClient : IUpdaterClient
     private readonly SemaphoreSlim preferencesGate = new(1, 1);
     private readonly object sync = new();
     private Task<CheckResult>? checking;
-    private Task? installing;
+    private Task<InstallOutcome>? installing;
     private UpdateCandidate? installingCandidate;
     private bool disposed;
+    private DateTimeOffset? lastAutomaticAttempt;
     private readonly HashSet<UpdateCandidate> candidates = [];
     private UpdateCandidate? pending;
     private UpdateCandidate? applied;
@@ -36,6 +39,9 @@ public sealed class UpdaterClient : IUpdaterClient
         UpdaterPreferences preferences, TimeProvider? clock = null, Action<string>? log = null)
         => (this.options, this.engine, this.store, this.restart, this.preferences, this.clock, this.log) =
             (options, engine, store, restart, preferences, clock ?? TimeProvider.System, log);
+
+    /// <summary>The longest disposal waits for outstanding work before abandoning it.</summary>
+    internal TimeSpan ShutdownTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>Load preferences and create a public GitHub updater. Logging is optional and contains no credentials.</summary>
     public static async Task<UpdaterClient> CreateAsync(UpdaterOptions options, IUpdateRestartCoordinator restartCoordinator,
@@ -52,12 +58,32 @@ public sealed class UpdaterClient : IUpdaterClient
             throw new ArgumentOutOfRangeException(nameof(options));
         var store = new PreferencesStore(options.SettingsDirectory, diagnostic);
         var preferences = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
+        IUpdateEngine? engine = null;
 #if UPDATER_LOCAL_VALIDATION
         // Compiled only into the local smoke-test package. Never enable for release builds.
         if (Environment.GetEnvironmentVariable("UPDATER_VALIDATION_FEED") is { Length: > 0 } feed)
-            return new(options, new VelopackEngine(options, sourceFactory: _ => new Velopack.Sources.SimpleFileSource(new(feed)), log: diagnostic), store, restartCoordinator, preferences, log: diagnostic);
+            engine = new VelopackEngine(options, sourceFactory: _ => new SignedFileSource(new(feed)), log: diagnostic);
 #endif
-        return new(options, new VelopackEngine(options, log: diagnostic), store, restartCoordinator, preferences, log: diagnostic);
+        engine ??= new VelopackEngine(options, log: diagnostic);
+        var client = new UpdaterClient(options, engine, store, restartCoordinator, preferences, log: diagnostic);
+        await client.VerifyLastInstallAsync().ConfigureAwait(false);
+        return client;
+    }
+
+    /// <summary>Confirms that an update scheduled by the previous process is now running.</summary>
+    internal async Task VerifyLastInstallAsync()
+    {
+        if (Preferences.PendingInstallVersion is not { } expected || engine.CurrentVersion is not { } current) return;
+        if (string.Equals(current, expected, StringComparison.OrdinalIgnoreCase)) {
+            Log($"update-verified version={expected}");
+            await RecordAsync(p => p with { PendingInstallVersion = null }, CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+        // The apply step failed after this process exited. Report it, and stop automatic installs retrying it in a loop.
+        Log($"category=update-not-applied expected={expected} current={current}");
+        Volatile.Write(ref state, new(UpdateStage.Failed, Message: "The last update could not be applied. The current version is still running."));
+        await RecordAsync(p => p with { PendingInstallVersion = null, LastOfferedVersion = expected, OfferDeferredUntilUtc = clock.GetUtcNow().AddHours(24) },
+            CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -94,7 +120,9 @@ public sealed class UpdaterClient : IUpdaterClient
             else {
                 if (origin == CheckOrigin.Automatic) {
                     if (!Preferences.CheckAutomatically) return new(CheckOutcomeKind.AutomaticCheckDisabled);
-                    if (Preferences.LastAutomaticNetworkCheckUtc is { } last && clock.GetUtcNow() - last < options.MinimumAutomaticCheckInterval)
+                    // The in-memory attempt still throttles when the persisted one could not be saved.
+                    var last = Preferences.LastAutomaticNetworkCheckUtc is { } saved && (lastAutomaticAttempt is null || saved > lastAutomaticAttempt) ? saved : lastAutomaticAttempt;
+                    if (last is { } attempt && clock.GetUtcNow() - attempt < options.MinimumAutomaticCheckInterval)
                         return new(CheckOutcomeKind.RecentlyChecked);
                 }
                 task = checking = Task.Run(() => CheckCoreAsync(origin, lifetime.Token), CancellationToken.None);
@@ -102,10 +130,15 @@ public sealed class UpdaterClient : IUpdaterClient
         }
         try {
             var result = await task.WaitAsync(cancellationToken).ConfigureAwait(false);
-            bool prompt = result.Candidate is { } c && (origin == CheckOrigin.Manual || Preferences.LastOfferedVersion != c.TargetVersion || Preferences.OfferDeferredUntilUtc <= clock.GetUtcNow() || Preferences.OfferDeferredUntilUtc is null);
-            if (origin == CheckOrigin.Automatic && result.Candidate is { } candidate && prompt && Preferences.ConsentMode == ConsentMode.InstallAutomatically) {
+            // A staged update the host deferred can be offered again by a manual check; one being installed cannot.
+            if (result.Kind == CheckOutcomeKind.UpdateInProgress) return result with { ShouldPrompt = origin == CheckOrigin.Manual && result.ShouldPrompt };
+            if (result.Kind != CheckOutcomeKind.UpdateAvailable || result.Candidate is not { } candidate) return result;
+            bool prompt = origin == CheckOrigin.Manual || Preferences.LastOfferedVersion != candidate.TargetVersion || Preferences.OfferDeferredUntilUtc <= clock.GetUtcNow() || Preferences.OfferDeferredUntilUtc is null;
+            if (origin == CheckOrigin.Automatic && prompt && Preferences.ConsentMode == ConsentMode.InstallAutomatically) {
                 // A staged or applied update finishes first; a newer candidate is offered again after restart.
                 if (Volatile.Read(ref applied) is not null || Volatile.Read(ref pending) is not null) prompt = false;
+                // Without a pinned publisher key, anyone able to write releases could install silently; ask instead.
+                else if (!engine.VerifiesPackageSignatures) Log("category=automatic-install-requires-signing-key");
                 else {
                     // Automatic installs run from host startup; failures are reported in the result, never thrown to the host.
                     try {
@@ -123,22 +156,34 @@ public sealed class UpdaterClient : IUpdaterClient
 
     private async Task<CheckResult> CheckCoreAsync(CheckOrigin origin, CancellationToken token)
     {
-        await operations.WaitAsync(token).ConfigureAwait(false);
+        // Never queue behind an install or restart: report it instead of leaving the caller waiting on the host.
+        if (!operations.Wait(0)) {
+            UpdateCandidate? current;
+            lock (sync) current = installingCandidate;
+            return new(CheckOutcomeKind.UpdateInProgress, current, "An update is being installed.");
+        }
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Log($"check origin={origin} channel={Preferences.Channel}");
         try {
+            // A different update is never offered while one is staged or scheduled.
+            if (applied is { } done) return new(CheckOutcomeKind.UpdateInProgress, done, "Exit the application to finish applying the update.");
+            if (pending is { } staged) return new(CheckOutcomeKind.UpdateInProgress, staged, "An update is ready to install when the application restarts.", ShouldPrompt: true);
             if (!engine.IsSupported) {
                 Publish(new(UpdateStage.UnsupportedInstallation));
                 return new(CheckOutcomeKind.UnsupportedInstallation, Message: "Install or extract a Velopack distribution to enable updates.");
             }
             Publish(new(UpdateStage.Checking));
-            if (origin == CheckOrigin.Automatic) await ChangePreferencesAsync(p => p with { LastAutomaticNetworkCheckUtc = clock.GetUtcNow() }, token).ConfigureAwait(false);
+            if (origin == CheckOrigin.Automatic) {
+                var now = clock.GetUtcNow();
+                lock (sync) lastAutomaticAttempt = now;
+                await RecordAsync(p => p with { LastAutomaticNetworkCheckUtc = now }, token).ConfigureAwait(false);
+            }
             var candidate = await engine.CheckAsync(Preferences.Channel, token).ConfigureAwait(false);
-            await ChangePreferencesAsync(p => p with { LastSuccessfulCheckUtc = clock.GetUtcNow() }, token).ConfigureAwait(false);
+            await RecordAsync(p => p with { LastSuccessfulCheckUtc = clock.GetUtcNow() }, token).ConfigureAwait(false);
             if (candidate is not null) lock (sync) candidates.Add(candidate);
-            Publish(pending is not null ? new(UpdateStage.AwaitingRestart, pending) : new(candidate is null ? UpdateStage.Idle : UpdateStage.UpdateAvailable, candidate));
+            Publish(new(candidate is null ? UpdateStage.Idle : UpdateStage.UpdateAvailable, candidate));
             return new(candidate is null ? CheckOutcomeKind.UpToDate : CheckOutcomeKind.UpdateAvailable, candidate);
-        } catch (OperationCanceledException) { Publish(new(pending is null ? UpdateStage.Idle : UpdateStage.AwaitingRestart, pending)); return new(CheckOutcomeKind.Cancelled); }
+        } catch (OperationCanceledException) { Publish(new(UpdateStage.Idle)); return new(CheckOutcomeKind.Cancelled); }
         catch (Exception ex) {
             var kind = ex switch {
                 HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests } => CheckOutcomeKind.RateLimited,
@@ -174,75 +219,89 @@ public sealed class UpdaterClient : IUpdaterClient
         } finally { preferencesGate.Release(); }
     }
 
+    // Bookkeeping must never cost the user an update, so a failed save is logged rather than thrown.
+    private async Task RecordAsync(Func<UpdaterPreferences, UpdaterPreferences> change, CancellationToken token)
+    {
+        try { await ChangePreferencesAsync(change, token).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"category=preferences-save-failure type={ex.GetType().Name}"); }
+    }
+
     /// <inheritdoc />
     public Task DeferAsync(UpdateCandidate candidate, CancellationToken cancellationToken = default)
     {
-        ValidateCandidate(candidate);
+        lock (sync) ValidateCandidate(candidate);
         return ChangePreferencesAsync(p => p with { LastOfferedVersion = candidate.TargetVersion, OfferDeferredUntilUtc = clock.GetUtcNow().AddHours(24) }, cancellationToken);
     }
 
     private void ValidateCandidate(UpdateCandidate candidate)
     {
-        lock (sync) {
-            ObjectDisposedException.ThrowIf(disposed, this);
-            if (!candidates.Contains(candidate)) throw new ArgumentException("Candidate was not offered by this client.", nameof(candidate));
-        }
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (!candidates.Contains(candidate)) throw new ArgumentException("Candidate was not offered by this client.", nameof(candidate));
     }
 
     /// <inheritdoc />
-    public Task InstallAsync(UpdateCandidate candidate, bool rememberAutomaticConsent = false, CancellationToken cancellationToken = default)
+    public Task<InstallOutcome> InstallAsync(UpdateCandidate candidate, bool rememberAutomaticConsent = false, CancellationToken cancellationToken = default)
     {
-        ValidateCandidate(candidate);
+        // One lock with the disposed check, so disposal always sees and joins the install it lets start.
         lock (sync) {
+            ValidateCandidate(candidate);
             if (installing is { IsCompleted: false }) {
                 if (!ReferenceEquals(candidate, installingCandidate)) throw new InvalidOperationException("A different candidate is already being installed.");
                 return installing.WaitAsync(cancellationToken);
             }
             installingCandidate = candidate;
-            installing = Task.Run(() => InstallCoreAsync(candidate, rememberAutomaticConsent, cancellationToken), CancellationToken.None);
-            return installing;
+            return installing = Task.Run(() => InstallCoreAsync(candidate, rememberAutomaticConsent, cancellationToken), CancellationToken.None);
         }
     }
 
-    private async Task InstallCoreAsync(UpdateCandidate candidate, bool remember, CancellationToken caller)
+    private async Task<InstallOutcome> InstallCoreAsync(UpdateCandidate candidate, bool remember, CancellationToken caller)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, lifetime.Token);
         var token = linked.Token;
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
-            if (ReferenceEquals(candidate, applied)) return;
+            if (ReferenceEquals(candidate, applied)) return InstallOutcome.RestartScheduled;
             if (applied is not null) throw new InvalidOperationException("Exit the application to finish applying the update.");
             if (pending is not null) {
                 if (!ReferenceEquals(candidate, pending)) throw new InvalidOperationException("Finish the staged update before installing another candidate.");
-                await RestartCoreAsync(token).ConfigureAwait(false);
-                return;
+                return await RestartCoreAsync(token).ConfigureAwait(false);
             }
             if (remember) await ChangePreferencesAsync(p => p with { ConsentMode = ConsentMode.InstallAutomatically }, token).ConfigureAwait(false);
             Publish(new(UpdateStage.Downloading, candidate, 0));
             await engine.DownloadAsync(candidate, p => Publish(new(UpdateStage.Downloading, candidate, Math.Clamp(p, 0, 100))), token).ConfigureAwait(false);
             pending = candidate;
             Publish(new(UpdateStage.AwaitingRestart, candidate));
-            await RestartCoreAsync(token).ConfigureAwait(false);
+            return await RestartCoreAsync(token).ConfigureAwait(false);
         } catch (OperationCanceledException) { Publish(new(pending is null ? UpdateStage.Idle : UpdateStage.AwaitingRestart, pending)); throw; }
         catch (Exception ex) { Publish(new(UpdateStage.Failed, candidate, Message: ex.Message)); throw; }
         finally { operations.Release(); }
     }
 
     /// <inheritdoc />
-    public async Task RetryPendingRestartAsync(CancellationToken cancellationToken = default)
+    public Task<InstallOutcome> RetryPendingRestartAsync(CancellationToken cancellationToken = default)
     {
-        lock (sync) ObjectDisposedException.ThrowIf(disposed, this);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        // Runs in the install slot so it joins an install in progress and disposal joins it.
+        lock (sync) {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (installing is { IsCompleted: false }) return installing.WaitAsync(cancellationToken);
+            installingCandidate = Volatile.Read(ref pending);
+            return installing = Task.Run(() => RetryCoreAsync(cancellationToken), CancellationToken.None);
+        }
+    }
+
+    private async Task<InstallOutcome> RetryCoreAsync(CancellationToken caller)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, lifetime.Token);
         await operations.WaitAsync(linked.Token).ConfigureAwait(false);
-        try { await RestartCoreAsync(linked.Token).ConfigureAwait(false); }
+        try { return await RestartCoreAsync(linked.Token).ConfigureAwait(false); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { Publish(new(UpdateStage.Failed, pending, Message: ex.Message)); throw; }
         finally { operations.Release(); }
     }
 
-    private async Task RestartCoreAsync(CancellationToken token)
+    private async Task<InstallOutcome> RestartCoreAsync(CancellationToken token)
     {
-        if (pending is not { } candidate) return;
+        if (pending is not { } candidate) return applied is null ? InstallOutcome.NoPendingUpdate : InstallOutcome.RestartScheduled;
         try { engine.VerifyCanApply(candidate); }
         catch {
             // A staged package that cannot be applied is dropped so a later install downloads it again.
@@ -252,14 +311,17 @@ public sealed class UpdaterClient : IUpdaterClient
         RestartDecision decision;
         try { decision = await restart.RequestRestartAsync(token).ConfigureAwait(false); }
         catch { await RestoreHostAsync().ConfigureAwait(false); throw; }
-        if (decision == RestartDecision.Defer) return;
+        if (decision == RestartDecision.Defer) return InstallOutcome.Deferred;
         // The host has released its resources, so cancellation no longer applies: apply, or give the host back its resources.
         Publish(new(UpdateStage.Applying, candidate));
         try { engine.Apply(candidate); }
         catch { await RestoreHostAsync().ConfigureAwait(false); throw; }
         applied = candidate;
         pending = null;
+        // Checked by the next process, so an apply that fails after this one exits is reported rather than lost.
+        await RecordAsync(p => p with { PendingInstallVersion = candidate.TargetVersion }, CancellationToken.None).ConfigureAwait(false);
         Publish(new(UpdateStage.Completed, candidate));
+        return InstallOutcome.RestartScheduled;
     }
 
     private async Task RestoreHostAsync()
@@ -274,10 +336,15 @@ public sealed class UpdaterClient : IUpdaterClient
         Task? check; Task? install;
         lock (sync) { if (disposed) return; disposed = true; check = checking; install = installing; }
         await lifetime.CancelAsync().ConfigureAwait(false);
-        try { await Task.WhenAll(check ?? Task.CompletedTask, install ?? Task.CompletedTask).ConfigureAwait(false); }
+        // Bounded, because a host that never answers RequestRestartAsync must not hang its own shutdown.
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var work = Task.WhenAll(check ?? Task.CompletedTask, install ?? Task.CompletedTask);
+        try { await work.WaitAsync(ShutdownTimeout).ConfigureAwait(false); }
+        catch (TimeoutException) when (!work.IsCompleted) { Log("category=shutdown-timeout"); return; }
         catch (Exception ex) { Log($"category=shutdown type={ex.GetType().Name}"); }
-        // Also join a separately requested pending restart before disposing the engine.
-        await operations.WaitAsync().ConfigureAwait(false);
+        var remaining = ShutdownTimeout - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        // Abandoned work keeps the engine, so it is disposed only once nothing can still be using it.
+        if (!await operations.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero).ConfigureAwait(false)) { Log("category=shutdown-timeout"); return; }
         engine.Dispose();
         operations.Release();
         lifetime.Dispose();

@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -18,6 +19,7 @@ internal sealed class VelopackEngine : IUpdateEngine
     private readonly PublicDownloader downloader;
     private readonly Func<UpdateChannel, IUpdateSource>? sourceFactory;
     private readonly Action<string>? log;
+    private readonly ECDsa? signingKey;
     private sealed record Selection(UpdateManager Manager, UpdateInfo Update);
 
     internal VelopackEngine(UpdaterOptions options, IVelopackLocator? locator = null, Func<UpdateChannel, IUpdateSource>? sourceFactory = null, Action<string>? log = null)
@@ -27,10 +29,15 @@ internal sealed class VelopackEngine : IUpdateEngine
         downloader = new(options.NetworkTimeout);
         this.sourceFactory = sourceFactory;
         this.log = log;
+        signingKey = options.PackageSigningKey is { } key ? PackageSignature.ImportPublicKey(key) : null;
     }
 
     public bool IsSupported => OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
         locator.CurrentlyInstalledVersion is not null && locator.AppId == options.AppId;
+
+    public string? CurrentVersion => locator.CurrentlyInstalledVersion?.ToString();
+
+    public bool VerifiesPackageSignatures => signingKey is not null;
 
     public async Task<UpdateCandidate?> CheckAsync(UpdateChannel channel, CancellationToken token)
     {
@@ -45,16 +52,34 @@ internal sealed class VelopackEngine : IUpdateEngine
             try { update = await manager.CheckForUpdatesAsync().ConfigureAwait(false); }
             catch (InvalidDataException ex) { invalid = ex; continue; }
             token.ThrowIfCancellationRequested();
-            if (update is null) continue;
+            // A non-default installed channel lets Velopack offer same-version or lower releases; never accept them.
+            if (update is null || manager.CurrentVersion is not { } current || update.TargetFullRelease.Version <= current) continue;
+            if (signingKey is not null && !await HasPublisherSignatureAsync(source, update.TargetFullRelease).ConfigureAwait(false)) {
+                // A release writer without the publisher key cannot get a package accepted; report it rather than fall back silently.
+                Log($"category=rejected-release stream={stream} reason=signature");
+                invalid = new InvalidDataException("The release package is not signed by the trusted publisher key.");
+                continue;
+            }
             // Full packages keep selection and integrity checking independent of delta history.
             update = new UpdateInfo(update.TargetFullRelease, false);
             var metadata = (source as ValidatedGithubSource)?.Metadata(update.TargetFullRelease);
-            var candidate = new UpdateCandidate(manager.CurrentVersion!.ToString(), update.TargetFullRelease.Version.ToString(), stream,
+            var candidate = new UpdateCandidate(current.ToString(), update.TargetFullRelease.Version.ToString(), stream,
                 metadata?.Published, metadata?.Url, update.TargetFullRelease.NotesMarkdown, new Selection(manager, update));
             if (best is null || update.TargetFullRelease.Version > SemanticVersion.Parse(best.TargetVersion)) best = candidate;
         }
         if (best is null && invalid is not null) throw invalid;
         return best;
+    }
+
+    private async Task<bool> HasPublisherSignatureAsync(IUpdateSource source, VelopackAsset asset)
+    {
+        if (source is not IPackageSignatureSource signatures || await signatures.GetSignatureAsync(asset).ConfigureAwait(false) is not { } signature) return false;
+        return PackageSignature.Verify(signingKey!, options.AppId, asset, signature);
+    }
+
+    private void Log(string message)
+    {
+        try { log?.Invoke(message); } catch { /* Diagnostics cannot fail an update. */ }
     }
 
     public async Task DownloadAsync(UpdateCandidate candidate, Action<int> progress, CancellationToken token)
@@ -65,6 +90,10 @@ internal sealed class VelopackEngine : IUpdateEngine
         var asset = selected.Update.TargetFullRelease;
         var packagePath = Path.Combine(locator.PackagesDir!, asset.FileName);
         try {
+            // The feed SHA-256 is what the publisher signed, so check the staged bytes against it directly.
+            using (var file = File.OpenRead(packagePath))
+                if (!string.Equals(Convert.ToHexString(await SHA256.HashDataAsync(file).ConfigureAwait(false)), asset.SHA256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Downloaded package does not match the selected release hash.");
             using var package = ZipFile.OpenRead(packagePath);
             var manifest = package.Entries.Single(e => e.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase));
             using var stream = manifest.Open();
@@ -96,16 +125,21 @@ internal sealed class VelopackEngine : IUpdateEngine
         selected.Manager.WaitExitThenApplyUpdates(selected.Update.TargetFullRelease, silent: true, restart: true);
     }
 
-    public void Dispose() => downloader.Dispose();
+    public void Dispose()
+    {
+        downloader.Dispose();
+        signingKey?.Dispose();
+    }
 }
 
-internal sealed class ValidatedGithubSource : GithubSource
+internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSource
 {
     private readonly UpdaterOptions options;
     private readonly UpdateChannel stream;
     private readonly Action<string>? log;
     private readonly Dictionary<GithubRelease, (string Tag, DateTimeOffset? Published)> releases = [];
     private int rejectedReleases;
+    private const int MaximumFeedDownloads = 5;
     internal ValidatedGithubSource(UpdaterOptions options, UpdateChannel stream, IFileDownloader downloader, Action<string>? log = null)
         : base(options.PublicReleaseRepository.ToString(), accessToken: null, prerelease: stream == UpdateChannel.Preview, downloader)
         => (this.options, this.stream, this.log) = (options, stream, log);
@@ -148,18 +182,32 @@ internal sealed class ValidatedGithubSource : GithubSource
 
     public override async Task<VelopackAssetFeed> GetReleaseFeed(IVelopackLogger logger, string? appId, string channel, Guid? stagingId = null, VelopackAsset? latestLocalRelease = null)
     {
-        var feed = await base.GetReleaseFeed(logger, appId, channel, stagingId, latestLocalRelease).ConfigureAwait(false);
-        var valid = feed.Assets.Where(asset => {
-            var release = ((GitBaseAsset)asset).Release;
-            if (releases.TryGetValue(release, out var metadata) && asset.PackageId == options.AppId && asset.Size > 0 && asset.FileName == Path.GetFileName(asset.FileName) &&
-                Regex.IsMatch(asset.SHA256 ?? "", "^[A-F0-9]{64}$") && asset.Version == SemanticVersion.Parse(metadata.Tag[1..]) &&
-                release.Assets.Any(a => a.Name == asset.FileName)) return true;
-            Reject("asset");
-            return false;
-        }).ToArray();
+        // GitBase downloads every release's feed and fails on the first bad one. Each release's feed lists only its own
+        // packages, so walking newest version first and stopping at the first valid full package finds the latest
+        // update with one download in the common case, and never more than a few.
+        var newest = (await GetReleases(Prerelease).ConfigureAwait(false))
+            .OrderByDescending(release => SemanticVersion.Parse(releases[release].Tag[1..])).Take(MaximumFeedDownloads);
+        bool attempted = rejectedReleases > 0;
+        foreach (var release in newest) {
+            attempted = true;
+            VelopackAssetFeed? feed;
+            try {
+                var bytes = await Downloader.DownloadBytes(GetAssetUrlFromName(release, $"releases.{channel}.json"), GetRequestHeaders("application/octet-stream")).ConfigureAwait(false);
+                feed = VelopackAssetFeed.FromJson(System.Text.Encoding.UTF8.GetString(bytes).TrimStart('﻿'));
+            } catch (Exception ex) when (ex is JsonException or InvalidDataException or FormatException or ArgumentException) { Reject("feed"); continue; }
+            var version = SemanticVersion.Parse(releases[release].Tag[1..]);
+            var valid = (feed?.Assets ?? []).Where(asset => {
+                if (asset.PackageId == options.AppId && asset.Size > 0 && asset.FileName == Path.GetFileName(asset.FileName) &&
+                    Regex.IsMatch(asset.SHA256 ?? "", "^[A-F0-9]{64}$") && asset.Version == version &&
+                    release.Assets.Any(a => a.Name == asset.FileName)) return true;
+                Reject("asset");
+                return false;
+            }).Select(asset => (VelopackAsset)new GitBaseAsset(asset, release)).ToArray();
+            if (valid.Any(asset => asset.Type == VelopackAssetType.Full)) return new VelopackAssetFeed { Assets = valid };
+        }
         // A channel with nothing valid left is reported as invalid rather than silently up to date.
-        if (valid.Length == 0 && (feed.Assets.Length > 0 || rejectedReleases > 0)) throw new InvalidDataException("Release feed identity, version, hash, or asset is invalid.");
-        return valid.Length == feed.Assets.Length ? feed : new VelopackAssetFeed { Assets = valid };
+        if (attempted) throw new InvalidDataException("Release feed identity, version, hash, or asset is invalid.");
+        return new VelopackAssetFeed();
     }
 
     public override async Task DownloadReleaseEntry(IVelopackLogger logger, VelopackAsset releaseEntry, string localFile, Action<int> progress, CancellationToken cancelToken)
@@ -173,6 +221,13 @@ internal sealed class ValidatedGithubSource : GithubSource
         if (Field("id") != options.AppId || !string.Equals(Field("machineArchitecture"), "x64", StringComparison.OrdinalIgnoreCase) ||
             !SemanticVersion.TryParse(Field("version"), out var version) || version != releaseEntry.Version)
             throw new InvalidDataException("Downloaded package identity, architecture, or version does not match the selected release.");
+    }
+
+    public async Task<byte[]?> GetSignatureAsync(VelopackAsset asset)
+    {
+        string name = asset.FileName + PackageSignature.Extension;
+        if (asset is not GitBaseAsset { Release: var release } || !release.Assets.Any(a => a.Name == name)) return null;
+        return await Downloader.DownloadBytes(GetAssetUrlFromName(release, name), GetRequestHeaders("application/octet-stream")).ConfigureAwait(false);
     }
 
     internal (DateTimeOffset? Published, Uri Url) Metadata(VelopackAsset asset)

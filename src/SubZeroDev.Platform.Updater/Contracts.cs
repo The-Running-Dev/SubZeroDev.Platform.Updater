@@ -31,7 +31,9 @@ public enum CheckOutcomeKind {
     /// <summary>A release failed validation.</summary>
     InvalidRelease,
     /// <summary>The operation was cancelled.</summary>
-    Cancelled }
+    Cancelled,
+    /// <summary>An update is already being installed, staged, or scheduled; Candidate is that update. Nothing was checked.</summary>
+    UpdateInProgress }
 /// <summary>The current stage of the updater.</summary>
 public enum UpdateStage {
     /// <summary>No operation is running.</summary>
@@ -44,6 +46,14 @@ public enum UpdateStage {
     Completed, /// <summary>An operation failed.</summary>
     Failed, /// <summary>This installation cannot update itself.</summary>
     UnsupportedInstallation }
+/// <summary>What an install or restart retry did.</summary>
+public enum InstallOutcome {
+    /// <summary>The update is scheduled; exit the application to apply it.</summary>
+    RestartScheduled,
+    /// <summary>The host deferred the restart; the verified update stays staged for RetryPendingRestartAsync.</summary>
+    Deferred,
+    /// <summary>No update was staged, so nothing was done.</summary>
+    NoPendingUpdate }
 /// <summary>The host's response to a safe restart request.</summary>
 public enum RestartDecision { /// <summary>Keep the staged update for a later retry.</summary>
     Defer, /// <summary>The host is quiescent and will exit after the updater returns.</summary>
@@ -57,6 +67,11 @@ public sealed record UpdaterOptions(string AppId, Uri PublicReleaseRepository, s
     /// <summary>Maximum wait for a response, and for further data while downloading a package; defaults to thirty seconds.
     /// A package download may take longer overall while it keeps receiving data.</summary>
     public TimeSpan NetworkTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>The publisher's ECDSA P-256 public key, as PEM or base64 SubjectPublicKeyInfo. When set, every full package
+    /// must carry a valid signature from this key before it is offered. When null, packages are checked only against the
+    /// SHA-256 in their own release, and InstallAutomatically consent still asks before each installation.</summary>
+    /// <exception cref="ArgumentException">The value is not an ECDSA P-256 public key.</exception>
+    public string? PackageSigningKey { get; init => field = value is null ? null : PackageSignature.Validate(value); }
 }
 
 /// <summary>Versioned, per-user preferences. Copies are immutable.</summary>
@@ -78,6 +93,8 @@ public sealed record UpdaterPreferences
     public string? LastOfferedVersion { get; init; }
     /// <summary>Automatic prompts for that version are suppressed until this time.</summary>
     public DateTimeOffset? OfferDeferredUntilUtc { get; init; }
+    /// <summary>The version the last apply was scheduled to install; cleared once the restarted application confirms it is running.</summary>
+    public string? PendingInstallVersion { get; init; }
 }
 
 /// <summary>An immutable, client-owned release selection. Install uses exactly this selection.</summary>
@@ -130,9 +147,9 @@ public interface IUpdaterClient : IAsyncDisposable
     /// <summary>Save editable preferences. Enabling automatic installation requires InstallAsync with consent.</summary>
     Task SavePreferencesAsync(UpdaterPreferences preferences, CancellationToken cancellationToken = default);
     /// <summary>Download the exact candidate and request a graceful restart. Explicit consent can be remembered.</summary>
-    Task InstallAsync(UpdateCandidate candidate, bool rememberAutomaticConsent = false, CancellationToken cancellationToken = default);
+    Task<InstallOutcome> InstallAsync(UpdateCandidate candidate, bool rememberAutomaticConsent = false, CancellationToken cancellationToken = default);
     /// <summary>Defer automatic prompts for this version for twenty-four hours.</summary>
     Task DeferAsync(UpdateCandidate candidate, CancellationToken cancellationToken = default);
     /// <summary>Retry the host restart decision for a staged, verified update.</summary>
-    Task RetryPendingRestartAsync(CancellationToken cancellationToken = default);
+    Task<InstallOutcome> RetryPendingRestartAsync(CancellationToken cancellationToken = default);
 }

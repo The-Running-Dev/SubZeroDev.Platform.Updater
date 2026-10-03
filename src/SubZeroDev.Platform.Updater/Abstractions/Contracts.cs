@@ -33,7 +33,9 @@ public enum CheckOutcomeKind {
     /// <summary>The operation was cancelled.</summary>
     Cancelled,
     /// <summary>An update is already being installed, staged, or scheduled; Candidate is that update. Nothing was checked.</summary>
-    UpdateInProgress }
+    UpdateInProgress,
+    /// <summary>The release repository does not exist or is not public; it may have been renamed or made private.</summary>
+    RepositoryNotFound }
 /// <summary>The current stage of the updater.</summary>
 public enum UpdateStage {
     /// <summary>No operation is running.</summary>

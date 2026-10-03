@@ -18,4 +18,4 @@ See [docs/consumer-guide.md](docs/consumer-guide.md) for integration, [CHANGELOG
 
 Use the .NET 10 SDK on Windows. `dotnet test` runs deterministic tests. `dotnet pack src/SubZeroDev.Platform.Updater -c Release -o artifacts/packages` creates the library and symbols packages. Samples restore the actual package from that local feed or nuget.org.
 
-The initial package is not published until the owner's NuGet publication credential is available. See `docs/releasing.md` for release and validation instructions.
+Licensed under the [MIT License](LICENSE). NuGet publication uses trusted publishing; the initial package is published once that is configured. See `docs/release-guide.md` for release and validation instructions.

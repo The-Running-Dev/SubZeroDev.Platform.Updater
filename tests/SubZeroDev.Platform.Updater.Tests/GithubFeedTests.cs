@@ -231,6 +231,13 @@ public sealed class GithubFeedTests
         Assert.Equal((System.Net.HttpStatusCode)status, error.StatusCode);
     }
 
+    [Fact] public async Task MissingRepositoryListingIsRepositoryNotFound()
+    {
+        var source = new ValidatedGithubSource(new("Example", new("https://github.com/example/app"), "unused"), UpdateChannel.Stable,
+            new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => new(System.Net.HttpStatusCode.NotFound))));
+        await Assert.ThrowsAsync<RepositoryNotFoundException>(() => source.GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
+    }
+
     [Fact] public async Task NotFoundIsNotARateLimit()
     {
         using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => new(System.Net.HttpStatusCode.NotFound)));

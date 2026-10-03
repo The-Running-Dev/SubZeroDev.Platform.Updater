@@ -23,6 +23,7 @@ try {
     $reader = [IO.StreamReader]::new($zip.GetEntry('SubZeroDev.Platform.Updater.nuspec').Open())
     try { [xml]$spec = $reader.ReadToEnd() } finally { $reader.Dispose() }
     if ($spec.package.metadata.dependencies.group.dependency.id -notcontains 'Velopack') { throw 'Missing transitive bootstrap dependency.' }
+    if ($spec.package.metadata.license.'#text' -ne 'MIT' -or $spec.package.metadata.license.type -ne 'expression') { throw 'Package must declare the MIT license expression.' }
     if ($spec.package.metadata.repository.url -ne 'https://github.com/The-Running-Dev/SubZeroDev.Platform.Updater') { throw 'Invalid source repository metadata.' }
 } finally { $zip.Dispose() }
 if (-not (Get-ChildItem artifacts/packages/*.snupkg)) { throw 'Missing symbols package.' }

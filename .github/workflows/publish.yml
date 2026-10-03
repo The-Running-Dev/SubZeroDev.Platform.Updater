@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  id-token: write   # NuGet trusted publishing exchanges the workflow's OIDC token for a short-lived API key
 jobs:
   publish:
     runs-on: windows-latest
@@ -14,20 +15,30 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
-      - name: Verify release tag and owner-selected license
+      - name: Verify release tag and license
         shell: pwsh
         run: |
           $version = dotnet msbuild src/SubZeroDev.Platform.Updater/SubZeroDev.Platform.Updater.csproj -getProperty:Version
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Run publication on the matching version tag.' }
-          if (-not (Test-Path LICENSE)) { throw 'Owner must select a license before NuGet publication.' }
+          if (-not (Test-Path LICENSE)) { throw 'LICENSE is missing.' }
+          if (-not $env:NUGET_USER) { throw 'Set the NUGET_USER variable in the nuget environment to the nuget.org account that owns the trusted publishing policy.' }
+        env:
+          NUGET_USER: ${{ vars.NUGET_USER }}
       - shell: pwsh
         run: ./scripts/Test-Package.ps1
+      - name: Check for validation packages
+        shell: pwsh
+        run: if (Get-ChildItem artifacts/packages/*local-validation*) { throw 'Local validation packages must never be published.' }
+      # Logged in only now: the trusted-publishing key is short-lived.
+      - name: NuGet trusted publishing login
+        id: nuget
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ vars.NUGET_USER }}
       - name: Publish package and symbols to nuget.org
         shell: pwsh
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
         run: |
-          if (Get-ChildItem artifacts/packages/*local-validation*) { throw 'Local validation packages must never be published.' }
-          if (-not $env:NUGET_API_KEY) { throw 'Configure NUGET_API_KEY in the nuget environment or replace this step with owner-configured trusted publishing.' }
           dotnet nuget push artifacts/packages/*.nupkg --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json
           if ($LASTEXITCODE) { throw 'NuGet publication failed.' }

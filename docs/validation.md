@@ -35,8 +35,7 @@ writes its outcome. Clear that variable for interactive use.
 
 ## Publication gates still requiring the owner
 
-- Choose the updater library license, then add its package license metadata.
-- Provide NuGet publication credentials (or configure trusted publishing) and publish 0.1.0.
+- Configure NuGet trusted publishing (nuget.org policy, `nuget` environment, `NUGET_USER`; see release-guide.md), then push the `v0.1.0` tag to publish.
 - Configure HOTCORNERS_RELEASE_TOKEN for CI Contents write to the public binary repository.
 - Configure a signing identity if signed distributions are required. These tests establish update
   mechanics and integrity validation; they do not establish Authenticode trust or SmartScreen reputation.
@@ -44,4 +43,4 @@ writes its outcome. Clear that variable for interactive use.
 The first product release is v1.1.0. Its workflow requires the published NuGet package before
 publishing binaries. The existing v1.0.0 release is untouched. Private-source CI can temporarily
 restore an actual local NuGet built from a pinned public updater commit; that bootstrap does not
-claim nuget.org publication. No paid package, external credential, or license choice is assumed.
+claim nuget.org publication. No paid package or external credential is assumed. The library is MIT licensed.

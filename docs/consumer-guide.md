@@ -72,7 +72,7 @@ The preferences file is forward compatible: unknown fields and a newer `schemaVe
 2. Embed the public key as `UpdaterOptions.PackageSigningKey`.
 3. Set `UPDATER_PACKAGE_SIGNING_KEY` to the private PEM when running `Pack-Application.ps1`; it writes `<package>.sig`.
 
-Keep the private key apart from the token that writes releases. Rotation steps are in [releasing.md](releasing.md).
+Keep the private key apart from the token that writes releases. Rotation steps are in [release-guide.md](release-guide.md).
 
 ## Release contract
 
@@ -81,11 +81,11 @@ Keep the private key apart from the token that writes releases. Rotation steps a
 - The release title is the tag. Drafts and releases without a feed are ignored.
 - Clients read at most the five newest releases per stream and use the newest valid one.
 
-`scripts/Pack-Application.ps1` and `scripts/Publish-Release.ps1` implement this; see [releasing.md](releasing.md).
+`scripts/Pack-Application.ps1` and `scripts/Publish-Release.ps1` implement this; see [release-guide.md](release-guide.md).
 
 ## Network behavior
 
-HTTPS to `api.github.com`, `github.com` and `*.githubusercontent.com` only, with at most five redirects. Packages larger than their feed declares are refused. A 403/429 is `RateLimited`; a `Retry-After` pauses automatic checks (up to one hour). A 404 reports the repository as not found. GitHub sees normal request metadata including IP address; there is no application telemetry.
+HTTPS to `api.github.com`, `github.com` and `*.githubusercontent.com` only, with at most five redirects. Packages larger than their feed declares are refused. A 403/429 is `RateLimited`; a `Retry-After` pauses automatic checks (up to one hour). A 404 on the release listing is `RepositoryNotFound` (renamed or made private). GitHub sees normal request metadata including IP address; there is no application telemetry.
 
 ## Samples
 

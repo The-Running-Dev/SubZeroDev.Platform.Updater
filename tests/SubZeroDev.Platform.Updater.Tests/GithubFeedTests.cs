@@ -87,6 +87,36 @@ public sealed class GithubFeedTests
         await Assert.ThrowsAsync<InvalidDataException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
     }
 
+    [Fact] public async Task OnlyTheNewestValidReleaseFeedIsDownloaded()
+    {
+        var d = new Downloader();
+        // Listed out of version order: the walk follows the tag version, not the API order.
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v1.1.0"), Release("v1.3.0"), Release("v1.2.0") });
+        d.Responses["https://github.com/example/app/releases/download/v1.3.0/releases.win-stable.json"] = Feed("1.3.0");
+        var feed = await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable");
+        Assert.Equal("1.3.0", Assert.Single(feed.Assets).Version.ToString());
+        Assert.Equal(2, d.Requests.Count);
+    }
+
+    [Fact] public async Task CorruptNewestFeedFallsBackToPreviousRelease()
+    {
+        var d = new Downloader();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(new[] { Release("v1.2.0"), Release("v1.1.0") });
+        d.Responses["https://github.com/example/app/releases/download/v1.2.0/releases.win-stable.json"] = "{ not json";
+        d.Responses["https://github.com/example/app/releases/download/v1.1.0/releases.win-stable.json"] = Feed("1.1.0");
+        Assert.Equal("1.1.0", Assert.Single((await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets).Version.ToString());
+    }
+
+    [Fact] public async Task FeedDownloadsAreBoundedWhenNothingIsValid()
+    {
+        var d = new Downloader();
+        var tags = Enumerable.Range(1, 8).Select(n => $"v1.{n}.0").ToArray();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(tags.Select(t => Release(t)));
+        foreach (var tag in tags) d.Responses[$"https://github.com/example/app/releases/download/{tag}/releases.win-stable.json"] = Feed(tag[1..], hash: "bad");
+        await Assert.ThrowsAsync<InvalidDataException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
+        Assert.Equal(6, d.Requests.Count);
+    }
+
     private sealed class Handler(Func<Stream> body) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

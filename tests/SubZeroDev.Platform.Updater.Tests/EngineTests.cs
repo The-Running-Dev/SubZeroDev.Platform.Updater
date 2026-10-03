@@ -80,4 +80,18 @@ public sealed class EngineTests
             Assert.Empty(Directory.GetFiles(directory, "*-full.nupkg"));
         } finally { Directory.Delete(directory, true); }
     }
+
+    [Theory]
+    [InlineData("win-preview", "1.2.0-preview.3", UpdateChannel.Stable, "1.1.0", "1.2.0-preview.3")]
+    [InlineData("win-preview", "1.2.0-preview.3", UpdateChannel.Preview, "1.1.0", "1.2.0-preview.3")]
+    [InlineData("win-stable", "1.1.0", UpdateChannel.Preview, "1.1.0", "1.1.0")]
+    [InlineData("win-preview", "1.2.0", UpdateChannel.Stable, "1.2.0", "1.2.0-preview.3")]
+    public async Task InstalledChannelNeverCausesDowngradeOrReinstall(string installed, string current, UpdateChannel channel, string stable, string preview)
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused"),
+            new TestVelopackLocator("Example", current, Path.GetTempPath(), null!, null!, null!, installed, null!, null!, null!),
+            stream => stream == UpdateChannel.Stable ? new Source(stable) : new Source(preview));
+        Assert.Equal(current, engine.CurrentVersion);
+        Assert.Null(await engine.CheckAsync(channel, default));
+    }
 }

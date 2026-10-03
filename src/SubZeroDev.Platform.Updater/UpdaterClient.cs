@@ -29,7 +29,10 @@ public sealed class UpdaterClient : IUpdaterClient
     private UpdateCandidate? installingCandidate;
     private bool disposed;
     private DateTimeOffset? lastAutomaticAttempt;
-    private readonly HashSet<UpdateCandidate> candidates = [];
+    // Only recent offers stay valid, so a long-lived host does not keep every checked release alive.
+    private const int MaximumRememberedCandidates = 4;
+    private readonly List<UpdateCandidate> candidates = [];
+    private DateTimeOffset? automaticBackoffUntil;
     private UpdateCandidate? pending;
     private UpdateCandidate? applied;
     private UpdaterPreferences preferences;
@@ -52,7 +55,8 @@ public sealed class UpdaterClient : IUpdaterClient
         if (string.IsNullOrWhiteSpace(options.AppId) || string.IsNullOrWhiteSpace(options.SettingsDirectory)) throw new ArgumentException("AppId and SettingsDirectory are required.");
         if (!options.PublicReleaseRepository.IsAbsoluteUri || options.PublicReleaseRepository.Scheme != "https" ||
             options.PublicReleaseRepository.Host != "github.com" || options.PublicReleaseRepository.AbsolutePath.Trim('/').Split('/').Length != 2 ||
-            options.PublicReleaseRepository.UserInfo.Length != 0 || options.PublicReleaseRepository.Query.Length != 0 || options.PublicReleaseRepository.Fragment.Length != 0)
+            options.PublicReleaseRepository.UserInfo.Length != 0 ||
+            options.PublicReleaseRepository.AbsolutePath.TrimEnd('/').EndsWith(".git", StringComparison.OrdinalIgnoreCase) || options.PublicReleaseRepository.Query.Length != 0 || options.PublicReleaseRepository.Fragment.Length != 0)
             throw new ArgumentException("Use a public https://github.com/owner/repository URL.");
         if (options.MinimumAutomaticCheckInterval < TimeSpan.FromMinutes(15) || options.NetworkTimeout <= TimeSpan.Zero || options.NetworkTimeout > TimeSpan.FromMinutes(5))
             throw new ArgumentOutOfRangeException(nameof(options));
@@ -124,6 +128,8 @@ public sealed class UpdaterClient : IUpdaterClient
                     var last = Preferences.LastAutomaticNetworkCheckUtc is { } saved && (lastAutomaticAttempt is null || saved > lastAutomaticAttempt) ? saved : lastAutomaticAttempt;
                     if (last is { } attempt && clock.GetUtcNow() - attempt < options.MinimumAutomaticCheckInterval)
                         return new(CheckOutcomeKind.RecentlyChecked);
+                    // GitHub asked clients to wait; manual checks still go through.
+                    if (automaticBackoffUntil is { } until && clock.GetUtcNow() < until) return new(CheckOutcomeKind.RecentlyChecked);
                 }
                 task = checking = Task.Run(() => CheckCoreAsync(origin, lifetime.Token), CancellationToken.None);
             }
@@ -179,8 +185,12 @@ public sealed class UpdaterClient : IUpdaterClient
                 await RecordAsync(p => p with { LastAutomaticNetworkCheckUtc = now }, token).ConfigureAwait(false);
             }
             var candidate = await engine.CheckAsync(Preferences.Channel, token).ConfigureAwait(false);
+            lock (sync) automaticBackoffUntil = null;
             await RecordAsync(p => p with { LastSuccessfulCheckUtc = clock.GetUtcNow() }, token).ConfigureAwait(false);
-            if (candidate is not null) lock (sync) candidates.Add(candidate);
+            if (candidate is not null) lock (sync) {
+                candidates.Add(candidate);
+                if (candidates.Count > MaximumRememberedCandidates) candidates.RemoveAt(0);
+            }
             Publish(new(candidate is null ? UpdateStage.Idle : UpdateStage.UpdateAvailable, candidate));
             return new(candidate is null ? CheckOutcomeKind.UpToDate : CheckOutcomeKind.UpdateAvailable, candidate);
         } catch (OperationCanceledException) { Publish(new(UpdateStage.Idle)); return new(CheckOutcomeKind.Cancelled); }
@@ -190,9 +200,22 @@ public sealed class UpdaterClient : IUpdaterClient
                 HttpRequestException or TimeoutException => CheckOutcomeKind.NetworkUnavailable,
                 _ => CheckOutcomeKind.InvalidRelease
             };
-            Publish(new(UpdateStage.Failed, Message: ex.Message));
+            if (kind == CheckOutcomeKind.RateLimited) {
+                // Honour Retry-After, but never wait less than the normal interval or more than an hour.
+                var wait = TimeSpan.FromTicks(Math.Clamp((ex as RateLimitedException)?.RetryAfter?.Ticks ?? 0, options.MinimumAutomaticCheckInterval.Ticks, TimeSpan.FromHours(1).Ticks));
+                lock (sync) automaticBackoffUntil = clock.GetUtcNow() + wait;
+            }
+            // Exception text can carry local paths and server detail, so users only see these fixed messages.
+            var message = kind switch {
+                CheckOutcomeKind.RateLimited => "GitHub is limiting requests right now. Try again later.",
+                CheckOutcomeKind.NetworkUnavailable when ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.NotFound } =>
+                    "The release repository was not found. It may have been renamed or made private.",
+                CheckOutcomeKind.NetworkUnavailable => "GitHub could not be reached. Check your connection and try again.",
+                _ => "The latest release could not be verified, so it was not used."
+            };
+            Publish(new(UpdateStage.Failed, Message: message));
             Log($"category={kind} type={ex.GetType().Name}");
-            return new(kind, Message: ex.Message);
+            return new(kind, Message: message);
         } finally { Log($"check-finished origin={origin} durationMs={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}"); operations.Release(); }
     }
 
@@ -236,7 +259,8 @@ public sealed class UpdaterClient : IUpdaterClient
     private void ValidateCandidate(UpdateCandidate candidate)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (!candidates.Contains(candidate)) throw new ArgumentException("Candidate was not offered by this client.", nameof(candidate));
+        if (!candidates.Contains(candidate) && !ReferenceEquals(candidate, pending) && !ReferenceEquals(candidate, applied) && !ReferenceEquals(candidate, installingCandidate))
+            throw new ArgumentException("Candidate was not offered by this client.", nameof(candidate));
     }
 
     /// <inheritdoc />
@@ -273,9 +297,11 @@ public sealed class UpdaterClient : IUpdaterClient
             Publish(new(UpdateStage.AwaitingRestart, candidate));
             return await RestartCoreAsync(token).ConfigureAwait(false);
         } catch (OperationCanceledException) { Publish(new(pending is null ? UpdateStage.Idle : UpdateStage.AwaitingRestart, pending)); throw; }
-        catch (Exception ex) { Publish(new(UpdateStage.Failed, candidate, Message: ex.Message)); throw; }
+        catch (Exception) { Publish(new(UpdateStage.Failed, candidate, Message: InstallFailure)); throw; }
         finally { operations.Release(); }
     }
+
+    private const string InstallFailure = "The update could not be installed. The current version is still running.";
 
     /// <inheritdoc />
     public Task<InstallOutcome> RetryPendingRestartAsync(CancellationToken cancellationToken = default)
@@ -295,7 +321,7 @@ public sealed class UpdaterClient : IUpdaterClient
         await operations.WaitAsync(linked.Token).ConfigureAwait(false);
         try { return await RestartCoreAsync(linked.Token).ConfigureAwait(false); }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { Publish(new(UpdateStage.Failed, pending, Message: ex.Message)); throw; }
+        catch (Exception) { Publish(new(UpdateStage.Failed, pending, Message: InstallFailure)); throw; }
         finally { operations.Release(); }
     }
 

@@ -40,15 +40,15 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
                 if (state.Stage == UpdateStage.Completed) window.Close();
             });
             void Show(CheckResult result) { status.Text = result.Message ?? result.Kind.ToString(); candidate = result.Candidate; install.IsEnabled = result.ShouldPrompt; }
-            check.Click += async (_, _) => { check.IsEnabled = false; try { Show(await client.CheckAsync(CheckOrigin.Manual)); } catch (Exception ex) { status.Text = ex.Message; } finally { check.IsEnabled = true; } };
-            install.Click += async (_, _) => { if (candidate is not null) try { await client.InstallAsync(candidate, remember.IsChecked == true); } catch (Exception ex) { status.Text = ex.Message; } };
+            check.Click += async (_, _) => { check.IsEnabled = false; try { Show(await client.CheckAsync(CheckOrigin.Manual)); } catch (Exception) { status.Text = "Updates are unavailable right now."; } finally { check.IsEnabled = true; } };
+            install.Click += async (_, _) => { if (candidate is not null) try { await client.InstallAsync(candidate, remember.IsChecked == true); } catch (Exception) { status.Text = "The update could not be installed. The current version is still running."; } };
             window.Closed += async (_, _) => await client.DisposeAsync();
             if (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } resultPath) {
                 var result = await client.CheckAsync(CheckOrigin.Manual);
                 await File.WriteAllTextAsync(resultPath, result.Kind.ToString());
                 window.Close();
             } else Show(await client.StartAutomaticCheckAsync());
-        } catch (Exception ex) { status.Text = ex.Message; }
+        } catch (Exception) { status.Text = "Updates are unavailable right now."; }
     }
     public Task<RestartDecision> RequestRestartAsync(CancellationToken cancellationToken)
     {

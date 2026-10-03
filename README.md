@@ -12,6 +12,8 @@ Preferences are stored atomically in the caller's settings directory. Automatic 
 
 Stable releases use `vX.Y.Z` and `win-stable`; previews use `vX.Y.Z-preview.N` and `win-preview`. Preview clients examine both channels and never downgrade. Releases must contain matching full packages and SHA-256 feed entries. Those hashes only prove a package matches its own release, so anyone who can write releases controls both. Set `UpdaterOptions.PackageSigningKey` to the publisher's ECDSA P-256 public key (PEM or base64 SubjectPublicKeyInfo) to require a `<package>.sig` signature from the matching private key; unsigned or foreign-signed releases are then never offered. Without a key, `InstallAutomatically` consent still prompts before each installation instead of installing silently. Release notes are untrusted text, never active HTML. No access token is accepted or embedded in clients. GitHub sees normal HTTPS request metadata, including IP address; there is no application telemetry.
 
+See [docs/consumer-guide.md](docs/consumer-guide.md) for integration, [CHANGELOG.md](CHANGELOG.md) for changes, and `samples/WpfTrayHost` and `samples/WinUIHost` for working hosts. Users only ever see fixed messages, never exception text. A `Retry-After` from GitHub pauses automatic checks (manual checks still run). Downloads follow at most five redirects, stay on GitHub hosts, and are capped at the size the release declares. The preferences file keeps unknown fields and newer schema versions.
+
 ## Build
 
 Use the .NET 10 SDK on Windows. `dotnet test` runs deterministic tests. `dotnet pack src/SubZeroDev.Platform.Updater -c Release -o artifacts/packages` creates the library and symbols packages. Samples restore the actual package from that local feed or nuget.org.

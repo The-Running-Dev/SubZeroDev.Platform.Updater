@@ -4,10 +4,10 @@ if ($LASTEXITCODE) { throw 'Library tests failed.' }
 dotnet pack src/SubZeroDev.Platform.Updater -c Release -p:ContinuousIntegrationBuild=true -o artifacts/packages
 if ($LASTEXITCODE) { throw 'NuGet pack failed.' }
 $feed = [IO.Path]::GetFullPath('artifacts/packages')
-$cache = [IO.Path]::GetFullPath("artifacts/consumer-cache-$([Guid]::NewGuid().ToString('N'))")
+$cache = [IO.Path]::GetFullPath("artifacts/consumer-cache-$([Guid]::NewGuid().ToString('N').Substring(0, 8))")
 $config = [IO.Path]::GetFullPath('artifacts/consumer.nuget.config')
 [IO.File]::WriteAllText($config, '<configuration><packageSources><clear/><add key="local" value="' + [Security.SecurityElement]::Escape($feed) + '"/><add key="nuget.org" value="https://api.nuget.org/v3/index.json"/></packageSources></configuration>')
-foreach ($sample in @('WpfHost', 'WinUIHost')) {
+foreach ($sample in @('WpfTrayHost', 'WinUIHost')) {
     dotnet restore "samples/$sample/$sample.csproj" --configfile $config --packages $cache
     if ($LASTEXITCODE) { throw "$sample clean package restore failed." }
     dotnet build "samples/$sample/$sample.csproj" -c Release --no-restore

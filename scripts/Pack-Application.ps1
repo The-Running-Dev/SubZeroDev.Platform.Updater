@@ -12,7 +12,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/PackageSignature.ps1"
-if ($Version -notmatch '^\d+\.\d+\.\d+(-preview\.[1-9]\d*)?$') { throw 'Version must be X.Y.Z or X.Y.Z-preview.N.' }
+if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-preview\.[1-9]\d*)?$') { throw 'Version must be X.Y.Z or X.Y.Z-preview.N.' }
 $channel = if ($Version.Contains('-preview.')) { 'win-preview' } else { 'win-stable' }
 if (-not $PublishDirectory) { $PublishDirectory = Join-Path $OutputDirectory 'application' }
 if (Test-Path $OutputDirectory) { throw "Use a new, empty output directory: $OutputDirectory" }
@@ -30,7 +30,14 @@ $arguments = @('tool', 'run', 'vpk', '--', 'pack', '--packId', $AppId, '--packVe
     '--packDir', $PublishDirectory, '--mainExe', $MainExe, '--runtime', 'win-x64', '--channel', $channel,
     '--outputDir', $assets, '--releaseNotes', $ReleaseNotes, '--packAuthors', 'SubZeroDev', '--msi', '--instLocation', 'PerUser')
 # Optional signing is performed by vpk for binaries and installers. Never log secret contents.
-if ($env:VELOPACK_SIGN_PARAMS) { $arguments += @('--signParams', $env:VELOPACK_SIGN_PARAMS) }
+# Prefer a mechanism that keeps secrets off the command line: Azure Trusted Signing reads a metadata file and
+# authenticates through the environment, and a custom command receives only a template.
+if ($env:VELOPACK_AZURE_SIGN_FILE) { $arguments += @('--azureTrustedSignFile', [IO.Path]::GetFullPath($env:VELOPACK_AZURE_SIGN_FILE)) }
+elseif ($env:VELOPACK_SIGN_TEMPLATE) { $arguments += @('--signTemplate', $env:VELOPACK_SIGN_TEMPLATE) }
+elseif ($env:VELOPACK_SIGN_PARAMS) {
+    Write-Warning 'VELOPACK_SIGN_PARAMS puts signing arguments, possibly including a certificate password, on the signtool command line where other local processes can read them. Prefer VELOPACK_AZURE_SIGN_FILE or VELOPACK_SIGN_TEMPLATE.'
+    $arguments += @('--signParams', $env:VELOPACK_SIGN_PARAMS)
+}
 & dotnet @arguments
 if ($LASTEXITCODE) { throw 'Velopack packaging failed.' }
 Copy-Item -LiteralPath $ReleaseNotes -Destination (Join-Path $assets 'RELEASE-NOTES.md')

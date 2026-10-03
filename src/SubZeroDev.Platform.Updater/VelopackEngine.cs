@@ -22,11 +22,11 @@ internal sealed class VelopackEngine : IUpdateEngine
     private readonly ECDsa? signingKey;
     private sealed record Selection(UpdateManager Manager, UpdateInfo Update);
 
-    internal VelopackEngine(UpdaterOptions options, IVelopackLocator? locator = null, Func<UpdateChannel, IUpdateSource>? sourceFactory = null, Action<string>? log = null)
+    internal VelopackEngine(UpdaterOptions options, IVelopackLocator? locator = null, Func<UpdateChannel, IUpdateSource>? sourceFactory = null, Action<string>? log = null, HttpMessageHandler? handler = null)
     {
         this.options = options;
         this.locator = locator ?? (VelopackLocator.IsCurrentSet ? VelopackLocator.Current : VelopackLocator.CreateDefaultForPlatform());
-        downloader = new(options.NetworkTimeout);
+        downloader = new(options.NetworkTimeout, handler);
         this.sourceFactory = sourceFactory;
         this.log = log;
         signingKey = options.PackageSigningKey is { } key ? PackageSignature.ImportPublicKey(key) : null;
@@ -164,7 +164,7 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
                 bool preview = element.GetProperty("prerelease").GetBoolean();
                 if (preview != (stream == UpdateChannel.Preview)) continue;
                 var tag = element.GetProperty("tag_name").GetString() ?? "";
-                string pattern = preview ? @"^v\d+\.\d+\.\d+-preview\.[1-9]\d*$" : @"^v\d+\.\d+\.\d+$";
+                string pattern = preview ? @"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-preview\.[1-9]\d*$" : @"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$";
                 // Legacy releases without a Velopack channel do not participate in this feed.
                 var release = JsonSerializer.Deserialize<GithubRelease>(element.GetRawText())!;
                 string feed = stream == UpdateChannel.Preview ? "releases.win-preview.json" : "releases.win-stable.json";
@@ -212,7 +212,10 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
 
     public override async Task DownloadReleaseEntry(IVelopackLogger logger, VelopackAsset releaseEntry, string localFile, Action<int> progress, CancellationToken cancelToken)
     {
-        await base.DownloadReleaseEntry(logger, releaseEntry, localFile, progress, cancelToken).ConfigureAwait(false);
+        // The feed declares the package size, so a response larger than that is cut off instead of filling the disk.
+        if (Downloader is ISizeLimitedDownloader limited) limited.MaximumDownloadBytes = releaseEntry.Size;
+        try { await base.DownloadReleaseEntry(logger, releaseEntry, localFile, progress, cancelToken).ConfigureAwait(false); }
+        finally { if (Downloader is ISizeLimitedDownloader reset) reset.MaximumDownloadBytes = null; }
         // Validate the manifest before UpdateManager renames its incomplete download into a staged package.
         using var package = ZipFile.OpenRead(localFile);
         using var manifest = package.Entries.Single(e => e.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)).Open();
@@ -237,33 +240,83 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
     }
 }
 
-internal sealed class PublicDownloader(TimeSpan timeout, HttpMessageHandler? handler = null) : IFileDownloader, IDisposable
+/// <summary>A downloader that can refuse responses larger than a known size.</summary>
+internal interface ISizeLimitedDownloader
 {
-    private readonly HttpClient client = new(handler ?? new HttpClientHandler()) { Timeout = Timeout.InfiniteTimeSpan };
+    long? MaximumDownloadBytes { set; }
+}
+
+/// <summary>GitHub asked the client to slow down; RetryAfter is its requested wait, when it said.</summary>
+internal sealed class RateLimitedException(string message, System.Net.HttpStatusCode status, TimeSpan? retryAfter) : HttpRequestException(message, null, status)
+{
+    internal TimeSpan? RetryAfter { get; } = retryAfter;
+}
+
+internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader, IDisposable
+{
+    private const int MaximumRedirects = 5;
+    private static readonly string UserAgent = "SubZeroDev.Platform.Updater/" +
+        (typeof(PublicDownloader).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion.Split('+')[0] ?? "0");
+    private readonly HttpClient client;
+    private readonly TimeSpan timeout;
+
+    internal PublicDownloader(TimeSpan timeout, HttpMessageHandler? handler = null)
+    {
+        this.timeout = timeout;
+        // Redirects are followed by SendAsync so every hop is checked against the GitHub allowlist.
+        client = new(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
+    }
+
     internal CancellationToken OperationToken { get; set; }
+    public long? MaximumDownloadBytes { get; set; }
+
+    private static Uri CheckedUri(Uri uri)
+    {
+        if (uri.Scheme != "https" || (uri.Host != "github.com" && uri.Host != "api.github.com" && !uri.Host.EndsWith(".githubusercontent.com", StringComparison.Ordinal)))
+            throw new InvalidDataException("Release downloads must use GitHub HTTPS URLs.");
+        return uri;
+    }
 
     private async Task<HttpResponseMessage> SendAsync(string url, CancellationToken token)
     {
-        var uri = new Uri(url);
-        if (uri.Scheme != "https" || (uri.Host != "github.com" && uri.Host != "api.github.com" && !uri.Host.EndsWith(".githubusercontent.com", StringComparison.Ordinal)))
-            throw new InvalidDataException("Release downloads must use GitHub HTTPS URLs.");
+        var uri = CheckedUri(new Uri(url));
         // One bounded retry for transient server errors. 403/429 are surfaced immediately.
-        for (int attempt = 0; ; attempt++) {
+        for (int attempt = 0, redirects = 0; ; ) {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            request.Headers.UserAgent.ParseAdd("SubZeroDev.Platform.Updater/0.1.0");
+            request.Headers.UserAgent.ParseAdd(UserAgent);
             var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
-            if ((int)response.StatusCode >= 500 && attempt == 0) {
+            if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308) {
+                var location = response.Headers.Location;
+                response.Dispose();
+                if (location is null || ++redirects > MaximumRedirects) throw new InvalidDataException("Release download redirected too many times.");
+                uri = CheckedUri(location.IsAbsoluteUri ? location : new Uri(uri, location));
+                continue;
+            }
+            if ((int)response.StatusCode >= 500 && attempt++ == 0) {
                 response.Dispose();
                 await Task.Delay(TimeSpan.FromMilliseconds(500), token).ConfigureAwait(false);
                 continue;
             }
             if (!response.IsSuccessStatusCode) {
                 var status = response.StatusCode;
+                var retryAfter = RetryAfter(response);
                 response.Dispose();
+                if (status is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests) throw new RateLimitedException($"GitHub returned HTTP {(int)status}.", status, retryAfter);
                 throw new HttpRequestException($"GitHub returned HTTP {(int)status}.", null, status);
             }
             return response;
         }
+    }
+
+    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        if (response.Headers.RetryAfter is { } retry) return retry.Delta ?? (retry.Date is { } date ? date - DateTimeOffset.UtcNow : null);
+        // A primary rate limit reports when its window resets instead.
+        if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining) && remaining.FirstOrDefault() == "0" &&
+            response.Headers.TryGetValues("x-ratelimit-reset", out var reset) && long.TryParse(reset.FirstOrDefault(), out var seconds))
+            return DateTimeOffset.FromUnixTimeSeconds(seconds) - DateTimeOffset.UtcNow;
+        return null;
     }
 
     // The timeout bounds the wait for response headers and, through the restart callback, each stall while reading the body.
@@ -302,8 +355,11 @@ internal sealed class PublicDownloader(TimeSpan timeout, HttpMessageHandler? han
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             await using var output = new FileStream(targetFile, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
             long total = r.Content.Headers.ContentLength ?? 0;
+            long? limit = MaximumDownloadBytes;
+            if (limit is { } declared && total > declared) throw new InvalidDataException("The package is larger than its release declares.");
             byte[] buffer = new byte[81920]; int count;
             while ((count = await input.ReadAsync(buffer, token).ConfigureAwait(false)) > 0) {
+                if (limit is { } maximum && output.Length + count > maximum) throw new InvalidDataException("The package is larger than its release declares.");
                 progressed();
                 await output.WriteAsync(buffer.AsMemory(0, count), token).ConfigureAwait(false);
                 if (total > 0) progress((int)Math.Min(100, output.Length * 100 / total));

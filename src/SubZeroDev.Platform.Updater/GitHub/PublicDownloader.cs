@@ -90,9 +90,9 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
     // The timeout bounds the wait for response headers and, through the restart callback, each stall while reading the body.
     private async Task<T> RequestAsync<T>(string url, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume, TimeSpan? totalTimeout = null)
     {
-        using var deadline = new CancellationTokenSource();
-        if (totalTimeout is { } total) deadline.CancelAfter(total);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra, deadline.Token);
+        using var deadline = totalTimeout is { } total ? new CancellationTokenSource(total) : null;
+        using var linked = deadline is null ? CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra)
+            : CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra, deadline.Token);
         linked.CancelAfter(timeout);
         try {
             using var response = await SendAsync(url, linked.Token).ConfigureAwait(false);

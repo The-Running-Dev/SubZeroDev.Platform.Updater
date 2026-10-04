@@ -62,8 +62,8 @@ internal sealed class TrayHost : IUpdateRestartCoordinator, IDisposable
         try {
             updater = await UpdaterClient.CreateAsync(new("SubZeroDev.UpdaterProbe", new("https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWpfTraySample")) {
-                    PackageSigningKey = typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
-                        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "UpdaterPackageSigningKey")?.Value
+                    PackageSigningKey = System.Reflection.CustomAttributeExtensions.GetCustomAttributes<System.Reflection.AssemblyMetadataAttribute>(typeof(Program).Assembly)
+                        .FirstOrDefault(a => a.Key == "UpdaterPackageSigningKey")?.Value
                         ?? (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } ? null
                             : throw new InvalidOperationException("Build with UpdaterPackageSigningKey before enabling updates."))
                 }, this);

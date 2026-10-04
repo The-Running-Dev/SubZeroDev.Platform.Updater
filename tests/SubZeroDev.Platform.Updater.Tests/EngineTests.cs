@@ -24,6 +24,13 @@ public sealed class EngineTests
         await Assert.ThrowsAsync<TimeoutException>(() => engine.CheckAsync(UpdateChannel.Preview, default));
     }
 
+    [Fact] public void SearchDeadlineFitsLongNetworkTimeout()
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused") { NetworkTimeout = TimeSpan.FromMinutes(5) },
+            new TestVelopackLocator("Example", "1.0.0", Path.GetTempPath()));
+        Assert.Equal(TimeSpan.FromMinutes(10), engine.CheckTimeout);
+    }
+
     [Fact] public async Task SearchCallerCancellationRemainsCancellation()
     {
         using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused"),

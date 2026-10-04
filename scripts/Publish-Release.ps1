@@ -15,11 +15,9 @@ foreach ($line in Get-Content -LiteralPath (Join-Path $AssetsDirectory 'SHA256SU
     if ((Get-FileHash -LiteralPath (Join-Path $AssetsDirectory $name)).Hash -ne $hash) { throw "Hash mismatch: $name" }
 }
 # The public key (PEM, base64, or a file holding either) is the one embedded in the application.
-if ($PackageSigningKey) {
-    if (Test-Path -LiteralPath $PackageSigningKey -PathType Leaf) { $PackageSigningKey = Get-Content -LiteralPath $PackageSigningKey -Raw }
-    $appId = (Get-Content -LiteralPath (Join-Path $AssetsDirectory "releases.$channel.json") -Raw | ConvertFrom-Json).Assets[0].PackageId
-    Assert-PackageSignatures $AssetsDirectory $appId $channel $PackageSigningKey
-}
+if (Test-Path -LiteralPath $PackageSigningKey -PathType Leaf) { $PackageSigningKey = Get-Content -LiteralPath $PackageSigningKey -Raw }
+$appId = (Get-Content -LiteralPath (Join-Path $AssetsDirectory "releases.$channel.json") -Raw | ConvertFrom-Json).Assets[0].PackageId
+Assert-PackageSignatures $AssetsDirectory $appId $channel $PackageSigningKey
 # Refuse to replace an existing release, including an incomplete draft; inspect it manually.
 # Only a definite "not found" allows creation; auth, network and rate-limit failures stop here.
 $existing = gh release view $tag --repo $Repository 2>&1

@@ -37,7 +37,7 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
         for (int page = 1; page <= MaximumReleasePages; page++) {
             string json;
             // Only the listing tells a missing repository apart; a missing asset stays a network failure.
-            try { json = await Downloader.DownloadString($"https://api.github.com/repos{RepoUri.AbsolutePath}/releases?per_page=100&page={page}").ConfigureAwait(false); }
+            try { json = await Downloader.DownloadString($"https://api.github.com/repos{RepoUri.AbsolutePath}/releases?per_page={ReleasesPerPage}&page={page}").ConfigureAwait(false); }
             catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound) { throw new RepositoryNotFoundException(ex); }
             using var document = JsonDocument.Parse(json);
             foreach (var element in document.RootElement.EnumerateArray().Take(ReleasesPerPage)) {
@@ -55,7 +55,7 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
                 result.Add(release);
                 releases.Add(release, (tag, release.PublishedAt is { } date ? new DateTimeOffset(DateTime.SpecifyKind(date, DateTimeKind.Utc)) : null));
             }
-            if (document.RootElement.GetArrayLength() < 100) break;
+            if (document.RootElement.GetArrayLength() < ReleasesPerPage) break;
         }
         if (result.Count == 0 && rejectedReleases > 0) throw new InvalidDataException("No release in this channel passed validation.");
         return result.ToArray();

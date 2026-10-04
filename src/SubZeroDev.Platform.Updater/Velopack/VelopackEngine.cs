@@ -26,6 +26,8 @@ internal sealed class VelopackEngine : IUpdateEngine
         this.sourceFactory = sourceFactory;
         this.log = log;
         signingKey = options.PackageSigningKey is { } key ? PackageSignature.ImportPublicKey(key) : null;
+        // A slow request with its one retry must still fit, so a long NetworkTimeout widens the budget.
+        CheckTimeout = TimeSpan.FromTicks(Math.Max(TimeSpan.FromMinutes(2).Ticks, options.NetworkTimeout.Ticks * 2));
     }
 
     public bool IsSupported => OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
@@ -36,7 +38,7 @@ internal sealed class VelopackEngine : IUpdateEngine
     public bool VerifiesPackageSignatures => signingKey is not null;
 
     // Covers both channels, listing pages, feeds and signature lookup as one bounded operation.
-    internal TimeSpan CheckTimeout { get; init; } = TimeSpan.FromMinutes(2);
+    internal TimeSpan CheckTimeout { get; init; }
 
     public async Task<UpdateCandidate?> CheckAsync(UpdateChannel channel, CancellationToken token)
     {

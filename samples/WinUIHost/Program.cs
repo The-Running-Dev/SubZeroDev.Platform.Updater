@@ -25,11 +25,12 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
     {
         window = new Window { Title = "WinUI updater host" };
         var status = new TextBlock { Text = "Ready", TextWrapping = TextWrapping.Wrap };
+        var lastInstall = new TextBlock { TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
         var check = new Button { Content = "Check for updates" };
         var remember = new CheckBox { Content = "Install future updates automatically", IsChecked = false };
         var install = new Button { Content = "Install and restart", IsEnabled = false };
         var panel = new StackPanel { Spacing = 12, Padding = new Thickness(24) };
-        panel.Children.Add(status); panel.Children.Add(check); panel.Children.Add(remember); panel.Children.Add(install);
+        panel.Children.Add(status); panel.Children.Add(lastInstall); panel.Children.Add(check); panel.Children.Add(remember); panel.Children.Add(install);
         window.Content = panel; window.Activate();
         // Async void handler: an escaping exception would terminate the app, so report it instead.
         try {
@@ -40,6 +41,7 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
                         ?? (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } ? null
                             : throw new InvalidOperationException("Build with UpdaterPackageSigningKey before enabling updates."))
                 }, this);
+            if (client.LastInstallOutcome is { } outcome) { lastInstall.Text = outcome.Message; lastInstall.Visibility = Visibility.Visible; }
             client.StateChanged += (_, state) => window.DispatcherQueue.TryEnqueue(() => {
                 status.Text = $"{state.Stage} {state.DownloadPercent}";
                 if (state.Stage == UpdateStage.Completed) window.Close();

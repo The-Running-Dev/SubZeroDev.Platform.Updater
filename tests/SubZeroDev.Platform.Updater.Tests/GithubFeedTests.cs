@@ -234,7 +234,7 @@ public sealed class GithubFeedTests
             return Task.FromResult(respond(request));
         }
     }
-    private static HttpResponseMessage Redirect(string location) => new(System.Net.HttpStatusCode.Redirect) { Headers = { Location = new(location) } };
+    private static HttpResponseMessage Redirect(string location) => new(System.Net.HttpStatusCode.Redirect) { Headers = { Location = new(location, UriKind.RelativeOrAbsolute) } };
     private const string FeedUrl = "https://github.com/example/app/releases/download/v1.1.0/releases.win-stable.json";
     private const string PackageUrl = "https://github.com/example/app/releases/download/v1.1.0/Example-full.nupkg";
 
@@ -264,7 +264,8 @@ public sealed class GithubFeedTests
 
     [Theory]
     [InlineData(429, "120", 120)]
-    [InlineData(403, null, null)]
+    [InlineData(429, null, null)]
+    [InlineData(403, "120", 120)]
     public async Task RateLimitCarriesRetryAfter(int status, string? header, int? seconds)
     {
         using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => {
@@ -275,6 +276,72 @@ public sealed class GithubFeedTests
         var error = await Assert.ThrowsAsync<RateLimitedException>(() => downloader.DownloadBytes(FeedUrl));
         Assert.Equal(seconds is null ? null : TimeSpan.FromSeconds(seconds.Value), error.RetryAfter);
         Assert.Equal((System.Net.HttpStatusCode)status, error.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(null, null, "", false)]
+    [InlineData("12", "9999999999", "{\"message\":\"Resource not accessible\"}", false)]
+    [InlineData("0", null, "", true)]
+    [InlineData("0", "999999999999999999", "", true)]
+    [InlineData(null, null, "{\"message\":\"You have exceeded a secondary rate limit.\"}", true)]
+    [InlineData(null, null, "not json", false)]
+    public async Task ForbiddenUsesRateLimitSignals(string? remaining, string? reset, string body, bool limited)
+    {
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden) { Content = new StringContent(body) };
+            if (remaining is not null) response.Headers.TryAddWithoutValidation("X-RateLimit-Remaining", remaining);
+            if (reset is not null) response.Headers.TryAddWithoutValidation("X-RateLimit-Reset", reset);
+            return response;
+        }));
+        var error = await Assert.ThrowsAnyAsync<HttpRequestException>(() => downloader.DownloadBytes(FeedUrl));
+        Assert.Equal(limited, error is RateLimitedException);
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, error.StatusCode);
+    }
+
+    [Fact] public async Task PrimaryRateLimitCarriesResetTime()
+    {
+        var reset = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds();
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(_ => {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden);
+            response.Headers.TryAddWithoutValidation("x-ratelimit-remaining", "0");
+            response.Headers.TryAddWithoutValidation("x-ratelimit-reset", reset.ToString());
+            return response;
+        }));
+        var error = await Assert.ThrowsAsync<RateLimitedException>(() => downloader.DownloadBytes(FeedUrl));
+        Assert.InRange(error.RetryAfter!.Value.TotalSeconds, 590, 600);
+    }
+
+    [Theory]
+    [InlineData("bytes")]
+    [InlineData("string")]
+    [InlineData("file")]
+    public async Task HeadersReachIntendedRequestsWithoutLeakingAcrossRedirects(string method)
+    {
+        var calls = 0;
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(r => {
+            Assert.Equal("application/octet-stream", r.Headers.Accept.ToString());
+            Assert.Equal("bytes=0-2", r.Headers.Range!.ToString());
+            Assert.Equal(calls < 2, r.Headers.Contains("Authorization"));
+            Assert.Equal(calls < 2, r.Headers.Contains("Cookie"));
+            Assert.Equal(calls < 2, r.Headers.Contains("X-Api-Key"));
+            return calls++ switch {
+                0 => Redirect("/same-host"),
+                1 => Redirect("https://objects.githubusercontent.com/package"),
+                2 => Redirect(FeedUrl), // Credentials stay stripped even when redirected back.
+                _ => new(System.Net.HttpStatusCode.OK) { Content = new StringContent("abc") }
+            };
+        }));
+        var headers = new Dictionary<string, string> { ["Accept"] = "application/octet-stream", ["Range"] = "bytes=0-2",
+            ["Authorization"] = "Bearer secret", ["Cookie"] = "secret=value", ["X-Api-Key"] = "secret" };
+        var file = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        try {
+            if (method == "file") { await downloader.DownloadFile(FeedUrl, file, _ => { }, headers); Assert.Equal("abc", await File.ReadAllTextAsync(file)); }
+            else if (method == "string") Assert.Equal("abc", await downloader.DownloadString(FeedUrl, headers));
+            else Assert.Equal("abc", Encoding.UTF8.GetString(await downloader.DownloadBytes(FeedUrl, headers)));
+            Assert.Equal(4, calls);
+            calls = 0;
+            await downloader.DownloadBytes(FeedUrl, headers); // Per-request headers survive reuse, never becoming client defaults.
+        } finally { File.Delete(file); }
     }
 
     [Fact] public async Task MissingRepositoryListingIsRepositoryNotFound()

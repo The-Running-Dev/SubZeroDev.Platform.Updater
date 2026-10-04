@@ -37,6 +37,7 @@ public sealed class UpdaterClient : IUpdaterClient
     private UpdateCandidate? applied;
     private UpdaterPreferences preferences;
     private UpdaterState state = new(UpdateStage.Idle);
+    private UpdaterState? lastInstallOutcome;
 
     internal UpdaterClient(UpdaterOptions options, IUpdateEngine engine, IPreferencesStore store, IUpdateRestartCoordinator restart,
         UpdaterPreferences preferences, TimeProvider? clock = null, Action<string>? log = null)
@@ -88,12 +89,15 @@ public sealed class UpdaterClient : IUpdaterClient
         if (Velopack.SemanticVersion.TryParse(current, out var running) &&
             Velopack.SemanticVersion.TryParse(expected, out var scheduled) && running >= scheduled) {
             Log($"update-verified version={expected}");
+            Volatile.Write(ref lastInstallOutcome, new(UpdateStage.Completed, Message: "The last update was applied successfully."));
             await RecordAsync(p => p with { PendingInstallVersion = null }, CancellationToken.None).ConfigureAwait(false);
             return;
         }
         // The apply step failed after this process exited. Report it, and stop automatic installs retrying it in a loop.
         Log($"category=update-not-applied expected={expected} current={current}");
-        Volatile.Write(ref state, new(UpdateStage.Failed, Message: "The last update could not be applied. The current version is still running."));
+        var outcome = new UpdaterState(UpdateStage.Failed, Message: "The last update could not be applied. The current version is still running.");
+        Volatile.Write(ref lastInstallOutcome, outcome);
+        Volatile.Write(ref state, outcome);
         await RecordAsync(p => p with { PendingInstallVersion = null, LastOfferedVersion = expected, OfferDeferredUntilUtc = clock.GetUtcNow().AddHours(24) },
             CancellationToken.None).ConfigureAwait(false);
     }
@@ -102,6 +106,8 @@ public sealed class UpdaterClient : IUpdaterClient
     public UpdaterPreferences Preferences => Volatile.Read(ref preferences);
     /// <inheritdoc />
     public UpdaterState State => Volatile.Read(ref state);
+    /// <inheritdoc />
+    public UpdaterState? LastInstallOutcome => Volatile.Read(ref lastInstallOutcome);
     /// <inheritdoc />
     public event EventHandler<UpdaterState>? StateChanged;
 
@@ -210,7 +216,9 @@ public sealed class UpdaterClient : IUpdaterClient
         } catch (OperationCanceledException) { Publish(new(UpdateStage.Idle)); return new(CheckOutcomeKind.Cancelled); }
         catch (Exception ex) {
             var kind = ex switch {
-                HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests } => CheckOutcomeKind.RateLimited,
+                RateLimitedException => CheckOutcomeKind.RateLimited,
+                HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } => CheckOutcomeKind.RateLimited,
+                HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized } => CheckOutcomeKind.AccessDenied,
                 RepositoryNotFoundException => CheckOutcomeKind.RepositoryNotFound,
                 HttpRequestException or TimeoutException => CheckOutcomeKind.NetworkUnavailable,
                 _ => CheckOutcomeKind.InvalidRelease
@@ -226,6 +234,7 @@ public sealed class UpdaterClient : IUpdaterClient
             // Exception text can carry local paths and server detail, so users only see these fixed messages.
             var message = kind switch {
                 CheckOutcomeKind.RateLimited => "GitHub is limiting requests right now. Try again later.",
+                CheckOutcomeKind.AccessDenied => "GitHub denied access to the release. Check the repository's access restrictions.",
                 CheckOutcomeKind.RepositoryNotFound => "The release repository was not found. It may have been renamed or made private.",
                 CheckOutcomeKind.NetworkUnavailable => "GitHub could not be reached. Check your connection and try again.",
                 _ => "The latest release could not be verified, so it was not used."

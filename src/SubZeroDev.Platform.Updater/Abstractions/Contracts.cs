@@ -26,7 +26,7 @@ public enum CheckOutcomeKind {
     UnsupportedInstallation,
     /// <summary>The network request failed or timed out.</summary>
     NetworkUnavailable,
-    /// <summary>GitHub refused the request because of throttling or access restrictions.</summary>
+    /// <summary>GitHub refused the request because of throttling.</summary>
     RateLimited,
     /// <summary>A release failed validation.</summary>
     InvalidRelease,
@@ -35,7 +35,9 @@ public enum CheckOutcomeKind {
     /// <summary>An update is already being installed, staged, or scheduled; Candidate is that update. Nothing was checked.</summary>
     UpdateInProgress,
     /// <summary>The release repository does not exist or is not public; it may have been renamed or made private.</summary>
-    RepositoryNotFound }
+    RepositoryNotFound,
+    /// <summary>GitHub denied access without indicating throttling.</summary>
+    AccessDenied }
 /// <summary>The current stage of the updater.</summary>
 public enum UpdateStage {
     /// <summary>No operation is running.</summary>
@@ -145,6 +147,9 @@ public interface IUpdaterClient : IAsyncDisposable
     UpdaterPreferences Preferences { get; }
     /// <summary>The current state.</summary>
     UpdaterState State { get; }
+    /// <summary>The previous process's install outcome, verified at startup: Completed or Failed, or null when unknown.
+    /// Retained for this client's lifetime so checks and installs cannot overwrite it; read after CreateAsync.</summary>
+    UpdaterState? LastInstallOutcome { get; }
     /// <summary>State notifications; subscribers must marshal to their UI dispatcher.</summary>
     event EventHandler<UpdaterState>? StateChanged;
     /// <summary>Check for updates. Concurrent checks share one network operation; each caller gets its own result.</summary>

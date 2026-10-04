@@ -58,4 +58,17 @@ public sealed class PackageSignatureTests
             Assert.Throws<ArgumentException>(() => new UpdaterOptions("Example", new("https://github.com/example/app"), "unused") { PackageSigningKey = text });
         Assert.Null(new UpdaterOptions("Example", new("https://github.com/example/app"), "unused").PackageSigningKey);
     }
+
+    [Fact] public void PrivateKeysAndMixedOrTrailingKeyMaterialAreRejected()
+    {
+        using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var publicPem = signer.ExportSubjectPublicKeyInfoPem();
+        foreach (var text in new[] {
+            signer.ExportECPrivateKeyPem(), signer.ExportPkcs8PrivateKeyPem(),
+            signer.ExportEncryptedPkcs8PrivateKeyPem("test", new(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 1000)),
+            Convert.ToBase64String(signer.ExportPkcs8PrivateKey()),
+            publicPem + signer.ExportECPrivateKeyPem(), signer.ExportECPrivateKeyPem() + publicPem,
+            publicPem + publicPem, Convert.ToBase64String([.. signer.ExportSubjectPublicKeyInfo(), 0])
+        }) Assert.Throws<ArgumentException>(() => new UpdaterOptions("Example", new("https://github.com/example/app"), "unused") { PackageSigningKey = text });
+    }
 }

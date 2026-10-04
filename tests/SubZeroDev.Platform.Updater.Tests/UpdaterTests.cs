@@ -223,7 +223,7 @@ public sealed class UpdaterTests
         Assert.Equal(CheckOutcomeKind.Cancelled, (await task).Kind);
     }
     [Theory]
-    [InlineData(403, CheckOutcomeKind.RateLimited)]
+    [InlineData(403, CheckOutcomeKind.AccessDenied)]
     [InlineData(429, CheckOutcomeKind.RateLimited)]
     [InlineData(503, CheckOutcomeKind.NetworkUnavailable)]
     public async Task HttpFailuresAreVisibleAndAutomaticFailuresAreThrottled(int status, CheckOutcomeKind expected) {
@@ -422,6 +422,9 @@ public sealed class UpdaterTests
         await f.Client.VerifyLastInstallAsync();
         Assert.Null(f.Store.Value.PendingInstallVersion);
         Assert.Equal(UpdateStage.Idle, f.Client.State.Stage);
+        Assert.Equal(UpdateStage.Completed, f.Client.LastInstallOutcome?.Stage);
+        await f.Client.StartAutomaticCheckAsync();
+        Assert.Equal(UpdateStage.Completed, f.Client.LastInstallOutcome?.Stage);
     }
     [Fact] public async Task NewerRunningVersionAlsoConfirmsScheduledInstall() {
         await using var f = new Fixture(new() { PendingInstallVersion = "2.0.0" });
@@ -437,6 +440,9 @@ public sealed class UpdaterTests
         Assert.Null(f.Store.Value.PendingInstallVersion);
         var result = await f.Client.StartAutomaticCheckAsync();
         Assert.False(result.ShouldPrompt);
+        Assert.Equal(UpdateStage.UpdateAvailable, f.Client.State.Stage);
+        Assert.Equal(UpdateStage.Failed, f.Client.LastInstallOutcome?.Stage);
+        Assert.Contains("last update could not be applied", f.Client.LastInstallOutcome?.Message);
         Assert.Equal(0, f.Engine.Downloads);
         Assert.True((await f.Client.CheckAsync(CheckOrigin.Manual)).ShouldPrompt);
     }
@@ -496,6 +502,20 @@ public sealed class UpdaterTests
         f.Clock.Now += TimeSpan.FromMinutes(2);
         f.Engine.Error = null;
         Assert.Equal(CheckOutcomeKind.UpdateAvailable, (await f.Client.StartAutomaticCheckAsync()).Kind);
+    }
+
+    [Fact] public async Task AccessDeniedIsNotThrottlingAndDoesNotAddRateLimitBackoff() {
+        await using var f = new Fixture();
+        Assert.Null(f.Client.LastInstallOutcome);
+        f.Engine.Error = new HttpRequestException("private detail", null, HttpStatusCode.Forbidden);
+        var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.Equal(CheckOutcomeKind.AccessDenied, result.Kind);
+        Assert.Contains("denied access", result.Message);
+        Assert.DoesNotContain("private detail", result.Message);
+        f.Clock.Now += TimeSpan.FromMinutes(16);
+        Assert.Equal(CheckOutcomeKind.AccessDenied, (await f.Client.StartAutomaticCheckAsync()).Kind);
+        Assert.Equal(2, f.Engine.Checks);
+        Assert.Null(f.Client.LastInstallOutcome);
     }
     [Fact] public async Task OnlyRecentOffersStayInstallable() {
         await using var f = new Fixture();

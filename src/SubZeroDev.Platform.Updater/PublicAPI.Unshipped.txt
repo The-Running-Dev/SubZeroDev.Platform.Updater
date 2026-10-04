@@ -1,4 +1,7 @@
 #nullable enable
+SubZeroDev.Platform.Updater.CheckOutcomeKind.AccessDenied = 11 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
+SubZeroDev.Platform.Updater.IUpdaterClient.LastInstallOutcome.get -> SubZeroDev.Platform.Updater.UpdaterState?
+SubZeroDev.Platform.Updater.UpdaterClient.LastInstallOutcome.get -> SubZeroDev.Platform.Updater.UpdaterState?
 SubZeroDev.Platform.Updater.UpdaterPreferences.AutomaticBackoffUntilUtc.get -> System.DateTimeOffset?
 SubZeroDev.Platform.Updater.UpdaterPreferences.AutomaticBackoffUntilUtc.init -> void
 SubZeroDev.Platform.Updater.UpdaterOptions.PackageDownloadTimeout.get -> System.TimeSpan

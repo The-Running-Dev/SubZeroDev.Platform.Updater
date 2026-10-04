@@ -33,7 +33,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
         this.timeout = timeout;
         this.packageDownloadTimeout = packageDownloadTimeout ?? TimeSpan.FromMinutes(30);
         // Redirects are followed by SendAsync so every hop is checked against the GitHub allowlist.
-        client = new(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
+        client = new(handler ?? new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
     internal CancellationToken OperationToken { get; set; }
@@ -46,19 +46,30 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
         return uri;
     }
 
-    private async Task<HttpResponseMessage> SendAsync(string url, CancellationToken token)
+    private async Task<HttpResponseMessage> SendAsync(string url, IDictionary<string, string>? headers, CancellationToken token)
     {
         var uri = CheckedUri(new Uri(url));
+        var forwardSensitiveHeaders = true;
         // One bounded retry for transient server errors. 403/429 are surfaced immediately.
         for (int attempt = 0, redirects = 0; ; ) {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.UserAgent.ParseAdd(UserAgent);
+            if (headers is not null) foreach (var header in headers) {
+                // Host is determined by the checked URL. Unknown custom headers may carry credentials.
+                if (header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!forwardSensitiveHeaders && !header.Key.Equals("Accept", StringComparison.OrdinalIgnoreCase) &&
+                    !header.Key.Equals("Range", StringComparison.OrdinalIgnoreCase) && !header.Key.Equals("If-Range", StringComparison.OrdinalIgnoreCase)) continue;
+                if (header.Key.Equals("User-Agent", StringComparison.OrdinalIgnoreCase)) request.Headers.UserAgent.Clear();
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
             var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
             if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308) {
                 var location = response.Headers.Location;
                 response.Dispose();
                 if (location is null || ++redirects > MaximumRedirects) throw new InvalidDataException("Release download redirected too many times.");
-                uri = CheckedUri(location.IsAbsoluteUri ? location : new Uri(uri, location));
+                var next = CheckedUri(location.IsAbsoluteUri ? location : new Uri(uri, location));
+                forwardSensitiveHeaders &= uri.Authority.Equals(next.Authority, StringComparison.OrdinalIgnoreCase);
+                uri = next;
                 continue;
             }
             if ((int)response.StatusCode >= 500 && attempt++ == 0) {
@@ -67,14 +78,35 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
                 continue;
             }
             if (!response.IsSuccessStatusCode) {
-                var status = response.StatusCode;
-                var retryAfter = RetryAfter(response);
-                response.Dispose();
-                if (status is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests) throw new RateLimitedException($"GitHub returned HTTP {(int)status}.", status, retryAfter);
-                throw new HttpRequestException($"GitHub returned HTTP {(int)status}.", null, status);
+                using (response) {
+                    var status = response.StatusCode;
+                    if (status == HttpStatusCode.TooManyRequests || status == HttpStatusCode.Forbidden &&
+                        (response.Headers.RetryAfter is not null || Exhausted(response) || await HasRateLimitMessageAsync(response, token).ConfigureAwait(false)))
+                        throw new RateLimitedException($"GitHub returned HTTP {(int)status}.", status, RetryAfter(response));
+                    throw new HttpRequestException($"GitHub returned HTTP {(int)status}.", null, status);
+                }
             }
             return response;
         }
+    }
+
+    private static bool Exhausted(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("x-ratelimit-remaining", out var values) && values.FirstOrDefault()?.Trim() == "0";
+
+    private static async Task<bool> HasRateLimitMessageAsync(HttpResponseMessage response, CancellationToken token)
+    {
+        // Secondary throttling may have only a JSON message. Bound untrusted error bodies and keep cancellation intact.
+        await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+        var buffer = new byte[8193];
+        var count = await stream.ReadAtLeastAsync(buffer, buffer.Length, throwOnEndOfStream: false, token).ConfigureAwait(false);
+        if (count == buffer.Length) return false;
+        try {
+            using var json = System.Text.Json.JsonDocument.Parse(buffer.AsMemory(0, count));
+            if (json.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                !json.RootElement.TryGetProperty("message", out var message) || message.ValueKind != System.Text.Json.JsonValueKind.String) return false;
+            var text = message.GetString()!;
+            return text.Contains("rate limit", StringComparison.OrdinalIgnoreCase) || text.Contains("abuse detection", StringComparison.OrdinalIgnoreCase);
+        } catch (System.Text.Json.JsonException) { return false; }
     }
 
     private static TimeSpan? RetryAfter(HttpResponseMessage response)
@@ -83,12 +115,12 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
         // A primary rate limit reports when its window resets instead.
         if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining) && remaining.FirstOrDefault() == "0" &&
             response.Headers.TryGetValues("x-ratelimit-reset", out var reset) && long.TryParse(reset.FirstOrDefault(), out var seconds))
-            return DateTimeOffset.FromUnixTimeSeconds(seconds) - DateTimeOffset.UtcNow;
+            if (seconds is >= -62135596800 and <= 253402300799) return DateTimeOffset.FromUnixTimeSeconds(seconds) - DateTimeOffset.UtcNow;
         return null;
     }
 
     // The timeout bounds the wait for response headers and, through the restart callback, each stall while reading the body.
-    private async Task<T> RequestAsync<T>(string url, double timeoutMinutes, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume, TimeSpan? totalTimeout = null)
+    private async Task<T> RequestAsync<T>(string url, IDictionary<string, string>? headers, double timeoutMinutes, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume, TimeSpan? totalTimeout = null)
     {
         // IFileDownloader specifies minutes and a maximum completion time, including for metadata.
         if (!double.IsFinite(timeoutMinutes) || timeoutMinutes <= 0 || timeoutMinutes > TimeSpan.FromMilliseconds(uint.MaxValue - 1).TotalMinutes)
@@ -100,7 +132,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra, deadline.Token);
         linked.CancelAfter(stallTimeout);
         try {
-            using var response = await SendAsync(url, linked.Token).ConfigureAwait(false);
+            using var response = await SendAsync(url, headers, linked.Token).ConfigureAwait(false);
             return await consume(response, linked.Token, () => linked.CancelAfter(stallTimeout)).ConfigureAwait(false);
         } catch (OperationCanceledException) when (!OperationToken.IsCancellationRequested && !extra.IsCancellationRequested) {
             throw new TimeoutException("The update request timed out.");
@@ -109,7 +141,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
 
     public Task<byte[]> DownloadBytes(string url, IDictionary<string, string>? headers = null, double timeout = 30) =>
         // Metadata is small, so one deadline covers the whole response.
-        RequestAsync(url, timeout, default, async (r, token, _) => {
+        RequestAsync(url, headers, timeout, default, async (r, token, _) => {
             if (r.Content.Headers.ContentLength > 8 * 1024 * 1024) throw new InvalidDataException("Release metadata is too large.");
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             using var output = new MemoryStream();
@@ -126,7 +158,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
 
     public Task DownloadFile(string url, string targetFile, Action<int> progress, IDictionary<string, string>? headers = null, double timeout = 30, CancellationToken cancelToken = default) =>
         // Progress resets the stall timer, while a separate total deadline bounds a trickling transfer.
-        RequestAsync(url, timeout, cancelToken, async (r, token, progressed) => {
+        RequestAsync(url, headers, timeout, cancelToken, async (r, token, progressed) => {
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             await using var output = new FileStream(targetFile, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
             long total = r.Content.Headers.ContentLength ?? 0;

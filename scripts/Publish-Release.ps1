@@ -7,16 +7,49 @@ if ([string]::IsNullOrWhiteSpace($PackageSigningKey)) { throw 'Production public
 $tag = "v$Version"
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-preview\.[1-9]\d*)?$') { throw 'Invalid release version.' }
 $channel = if ($Version.Contains('-preview.')) { 'win-preview' } else { 'win-stable' }
-foreach ($pattern in @('*-Portable.zip', '*-Setup.exe', '*.msi', '*-full.nupkg', "releases.$channel.json", 'SHA256SUMS', 'RELEASE-NOTES.md')) {
-    if (-not (Get-ChildItem -LiteralPath $AssetsDirectory -File | Where-Object Name -like $pattern)) { throw "Missing $pattern" }
+$feed = Get-Content -LiteralPath (Join-Path $AssetsDirectory "releases.$channel.json") -Raw | ConvertFrom-Json
+$appId = $feed.Assets[0].PackageId
+if ($appId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw 'Invalid release application ID.' }
+$required = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($name in @("$appId-$channel-Portable.zip", "$appId-$channel-Setup.exe", "$appId-$channel.msi", "releases.$channel.json", 'SHA256SUMS', 'RELEASE-NOTES.md')) {
+    [void]$required.Add($name)
 }
+$packages = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($asset in $feed.Assets) {
+    if ($asset.PackageId -cne $appId -or $asset.Version -cne $Version -or $asset.Type -cnotin @('Full', 'Delta')) { throw 'Feed identity/version/type mismatch.' }
+    $name = "$($asset.FileName)"
+    $suffix = "$($asset.Type)".ToLowerInvariant()
+    if ($name -cne "$appId-$Version-$channel-$suffix.nupkg" -or -not $packages.Add($name)) { throw 'Invalid or duplicate feed package name.' }
+    [void]$required.Add($name)
+    if ($asset.Type -ceq 'Full') { [void]$required.Add("$name.sig") }
+    $path = Join-Path $AssetsDirectory $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -ne $asset.Size -or
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $asset.SHA256) { throw "Feed package mismatch: $name" }
+}
+$allowed = [Collections.Generic.HashSet[string]]::new($required, [StringComparer]::Ordinal)
+# vpk also emits these channel-specific metadata files.
+[void]$allowed.Add("assets.$channel.json")
+[void]$allowed.Add("RELEASES-$channel")
+$files = @(Get-ChildItem -LiteralPath $AssetsDirectory -Force)
+foreach ($file in $files) {
+    if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $allowed.Contains($file.Name)) { throw "Unexpected release asset: $($file.Name)" }
+}
+foreach ($name in $required) {
+    if ($files.Name -cnotcontains $name) {
+        if ($name.EndsWith('.sig')) { throw "Missing package signature: $name" }
+        throw "Missing release asset: $name"
+    }
+}
+$hashNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($line in Get-Content -LiteralPath (Join-Path $AssetsDirectory 'SHA256SUMS')) {
-    $hash, $name = $line -split '  ', 2
-    if ((Get-FileHash -LiteralPath (Join-Path $AssetsDirectory $name)).Hash -ne $hash) { throw "Hash mismatch: $name" }
+    if ($line -cnotmatch '^([a-fA-F0-9]{64})  ([^\\/:]+)$') { throw 'Invalid SHA256SUMS entry.' }
+    $hash = $Matches[1]; $name = $Matches[2]
+    if ($name -ceq 'SHA256SUMS' -or $files.Name -cnotcontains $name -or -not $hashNames.Add($name)) { throw "Unexpected or duplicate SHA256SUMS entry: $name" }
+    if ((Get-FileHash -LiteralPath (Join-Path $AssetsDirectory $name) -Algorithm SHA256).Hash -ne $hash) { throw "Hash mismatch: $name" }
 }
+if (-not $hashNames.SetEquals([string[]]@($files.Name | Where-Object { $_ -cne 'SHA256SUMS' }))) { throw 'SHA256SUMS must match the upload set exactly (excluding SHA256SUMS itself).' }
 # The public key (PEM, base64, or a file holding either) is the one embedded in the application.
 if (Test-Path -LiteralPath $PackageSigningKey -PathType Leaf) { $PackageSigningKey = Get-Content -LiteralPath $PackageSigningKey -Raw }
-$appId = (Get-Content -LiteralPath (Join-Path $AssetsDirectory "releases.$channel.json") -Raw | ConvertFrom-Json).Assets[0].PackageId
 Assert-PackageSignatures $AssetsDirectory $appId $channel $PackageSigningKey
 # Refuse to replace an existing release, including an incomplete draft; inspect it manually.
 # Only a definite "not found" allows creation; auth, network and rate-limit failures stop here.
@@ -27,7 +60,6 @@ $argsList = @('release', 'create', $tag, '--repo', $Repository, '--draft', '--ti
 if ($channel -eq 'win-preview') { $argsList += '--prerelease' }
 gh @argsList
 if ($LASTEXITCODE) { throw 'Could not create draft release.' }
-$files = @(Get-ChildItem -LiteralPath $AssetsDirectory -File)
 gh release upload $tag --repo $Repository @($files.FullName)
 if ($LASTEXITCODE) { throw 'Upload failed; release remains a draft.' }
 # Compare remote content, not just names and sizes. Drafts are only reachable by release ID.

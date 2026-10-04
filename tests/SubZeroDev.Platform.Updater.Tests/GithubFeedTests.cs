@@ -111,11 +111,37 @@ public sealed class GithubFeedTests
     [Fact] public async Task FeedDownloadsAreBoundedWhenNothingIsValid()
     {
         var d = new Downloader();
-        var tags = Enumerable.Range(1, 8).Select(n => $"v1.{n}.0").ToArray();
-        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(tags.Select(t => Release(t)));
+        var tags = Enumerable.Range(1, 300).Select(n => $"v1.{n}.0").ToArray();
+        for (int page = 1; page <= 3; page++)
+            d.Responses[$"https://api.github.com/repos/example/app/releases?per_page=100&page={page}"] = JsonSerializer.Serialize(tags.Skip((page - 1) * 100).Take(100).Select(t => Release(t)));
         foreach (var tag in tags) d.Responses[$"https://github.com/example/app/releases/download/{tag}/releases.win-stable.json"] = Feed(tag[1..], hash: "bad");
         await Assert.ThrowsAsync<InvalidDataException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
-        Assert.Equal(6, d.Requests.Count);
+        Assert.Equal(303, d.Requests.Count);
+    }
+
+    [Fact] public async Task RateLimitedFeedStopsSearchImmediately()
+    {
+        int requests = 0;
+        using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Responder(request => {
+            requests++;
+            return request.RequestUri!.Host == "api.github.com"
+                ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new[] { Release("v1.2.0"), Release("v1.1.0") })) }
+                : new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+        }));
+        var source = new ValidatedGithubSource(new("Example", new("https://github.com/example/app"), "unused"), UpdateChannel.Stable, downloader);
+        await Assert.ThrowsAsync<RateLimitedException>(() => source.GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
+        Assert.Equal(2, requests);
+    }
+
+    [Fact] public async Task FiveMalformedFeedsDoNotHideOlderValidRelease()
+    {
+        var d = new Downloader();
+        var tags = Enumerable.Range(1, 6).Select(n => $"v1.{n}.0").ToArray();
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=1"] = JsonSerializer.Serialize(tags.Select(t => Release(t)));
+        foreach (var tag in tags) d.Responses[$"https://github.com/example/app/releases/download/{tag}/releases.win-stable.json"] = tag == "v1.1.0" ? Feed("1.1.0") : "broken json";
+        var feed = await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable");
+        Assert.Equal("1.1.0", Assert.Single(feed.Assets).Version.ToString());
+        Assert.Equal(7, d.Requests.Count);
     }
 
     [Fact] public async Task SignatureIsReadFromTheSameReleaseAndAbsentSignatureIsNull()
@@ -167,6 +193,26 @@ public sealed class GithubFeedTests
             using var downloader = new PublicDownloader(TimeSpan.FromMilliseconds(400), new Handler(() => new TrickleStream(8, TimeSpan.FromMilliseconds(100))));
             await downloader.DownloadFile("https://github.com/example/app/releases/download/v1.1.0/Example-full.nupkg", file, _ => { });
             Assert.Equal(8, new FileInfo(file).Length);
+        } finally { File.Delete(file); }
+    }
+
+    [Fact] public async Task TotalDeadlineStopsPackageEvenWhileDataArrives()
+    {
+        string file = Path.Combine(Path.GetTempPath(), "updater-download-" + Guid.NewGuid());
+        try {
+            using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Handler(() => new TrickleStream(1000, TimeSpan.FromMilliseconds(20))), TimeSpan.FromMilliseconds(300));
+            await Assert.ThrowsAsync<TimeoutException>(() => downloader.DownloadFile(FeedUrl, file, _ => { }));
+            Assert.InRange(new FileInfo(file).Length, 1, 999);
+        } finally { File.Delete(file); }
+    }
+
+    [Fact] public async Task CallerCancellationRemainsCancellationWithTotalDeadline()
+    {
+        string file = Path.Combine(Path.GetTempPath(), "updater-download-" + Guid.NewGuid());
+        try {
+            using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+            using var downloader = new PublicDownloader(TimeSpan.FromSeconds(5), new Handler(() => new TrickleStream(1000, TimeSpan.FromMilliseconds(20))), TimeSpan.FromSeconds(10));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => downloader.DownloadFile(FeedUrl, file, _ => { }, cancelToken: cancel.Token));
         } finally { File.Delete(file); }
     }
 

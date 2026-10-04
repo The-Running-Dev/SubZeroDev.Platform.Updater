@@ -22,7 +22,7 @@ internal sealed class VelopackEngine : IUpdateEngine
     {
         this.options = options;
         this.locator = locator ?? (VelopackLocator.IsCurrentSet ? VelopackLocator.Current : VelopackLocator.CreateDefaultForPlatform());
-        downloader = new(options.NetworkTimeout, handler);
+        downloader = new(options.NetworkTimeout, handler, options.PackageDownloadTimeout);
         this.sourceFactory = sourceFactory;
         this.log = log;
         signingKey = options.PackageSigningKey is { } key ? PackageSignature.ImportPublicKey(key) : null;
@@ -35,7 +35,20 @@ internal sealed class VelopackEngine : IUpdateEngine
 
     public bool VerifiesPackageSignatures => signingKey is not null;
 
+    // Covers both channels, listing pages, feeds and signature lookup as one bounded operation.
+    internal TimeSpan CheckTimeout { get; init; } = TimeSpan.FromMinutes(2);
+
     public async Task<UpdateCandidate?> CheckAsync(UpdateChannel channel, CancellationToken token)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(CheckTimeout);
+        try { return await CheckCoreAsync(channel, deadline.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) {
+            throw new TimeoutException("The release search exceeded its time budget.");
+        }
+    }
+
+    private async Task<UpdateCandidate?> CheckCoreAsync(UpdateChannel channel, CancellationToken token)
     {
         downloader.OperationToken = token;
         UpdateCandidate? best = null;

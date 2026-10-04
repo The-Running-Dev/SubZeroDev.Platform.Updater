@@ -1,1 +1,3 @@
 #nullable enable
+SubZeroDev.Platform.Updater.UpdaterOptions.PackageDownloadTimeout.get -> System.TimeSpan
+SubZeroDev.Platform.Updater.UpdaterOptions.PackageDownloadTimeout.init -> void

@@ -16,7 +16,8 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
     private readonly Action<string>? log;
     private readonly Dictionary<GithubRelease, (string Tag, DateTimeOffset? Published)> releases = [];
     private int rejectedReleases;
-    private const int MaximumFeedDownloads = 5;
+    private const int MaximumReleasePages = 3;
+    private const int ReleasesPerPage = 100;
     internal ValidatedGithubSource(UpdaterOptions options, UpdateChannel stream, IFileDownloader downloader, Action<string>? log = null)
         : base(options.PublicReleaseRepository.ToString(), accessToken: null, prerelease: stream == UpdateChannel.Preview, downloader)
         => (this.options, this.stream, this.log) = (options, stream, log);
@@ -33,13 +34,13 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
         rejectedReleases = 0;
         var result = new List<GithubRelease>();
         // Bound work, but scan beyond GithubSource's default ten releases so busy preview streams don't hide stable releases.
-        for (int page = 1; page <= 3; page++) {
+        for (int page = 1; page <= MaximumReleasePages; page++) {
             string json;
             // Only the listing tells a missing repository apart; a missing asset stays a network failure.
             try { json = await Downloader.DownloadString($"https://api.github.com/repos{RepoUri.AbsolutePath}/releases?per_page=100&page={page}").ConfigureAwait(false); }
             catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound) { throw new RepositoryNotFoundException(ex); }
             using var document = JsonDocument.Parse(json);
-            foreach (var element in document.RootElement.EnumerateArray()) {
+            foreach (var element in document.RootElement.EnumerateArray().Take(ReleasesPerPage)) {
                 if (element.GetProperty("draft").GetBoolean()) continue;
                 bool preview = element.GetProperty("prerelease").GetBoolean();
                 if (preview != (stream == UpdateChannel.Preview)) continue;
@@ -64,9 +65,9 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
     {
         // GitBase downloads every release's feed and fails on the first bad one. Each release's feed lists only its own
         // packages, so walking newest version first and stopping at the first valid full package finds the latest
-        // update with one download in the common case, and never more than a few.
+        // update with one download in the common case. The listing bounds worst-case work to 300 feeds.
         var newest = (await GetReleases(Prerelease).ConfigureAwait(false))
-            .OrderByDescending(release => SemanticVersion.Parse(releases[release].Tag[1..])).Take(MaximumFeedDownloads);
+            .OrderByDescending(release => SemanticVersion.Parse(releases[release].Tag[1..]));
         bool attempted = rejectedReleases > 0;
         foreach (var release in newest) {
             attempted = true;

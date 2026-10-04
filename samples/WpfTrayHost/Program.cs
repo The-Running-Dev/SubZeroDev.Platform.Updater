@@ -61,7 +61,12 @@ internal sealed class TrayHost : IUpdateRestartCoordinator, IDisposable
         // An async void entry point: an escaping exception would terminate the app, so report it instead.
         try {
             updater = await UpdaterClient.CreateAsync(new("SubZeroDev.UpdaterProbe", new("https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWpfTraySample")), this);
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWpfTraySample")) {
+                    PackageSigningKey = typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+                        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "UpdaterPackageSigningKey")?.Value
+                        ?? (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } ? null
+                            : throw new InvalidOperationException("Build with UpdaterPackageSigningKey before enabling updates."))
+                }, this);
             // StateChanged has no thread guarantee; the menu belongs to the dispatcher thread.
             updater.StateChanged += (_, state) => application.Dispatcher.BeginInvoke(() => {
                 status.Text = state.Message ?? $"{state.Stage} {state.DownloadPercent}".Trim();

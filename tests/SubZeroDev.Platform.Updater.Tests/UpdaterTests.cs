@@ -43,6 +43,7 @@ public sealed class UpdaterTests
         public bool VerifiesPackageSignatures { get; set; } = true;
         internal int Checks, Downloads, Applies;
         internal Exception? ApplyError, VerifyError;
+        internal Action? BeforeApply;
         internal UpdateChannel Channel;
         internal UpdateCandidate? Candidate = CandidateFor("2.0.0");
         internal Exception? Error;
@@ -60,7 +61,7 @@ public sealed class UpdaterTests
             return Task.CompletedTask;
         }
         public void VerifyCanApply(UpdateCandidate candidate) { if (VerifyError is not null) throw VerifyError; }
-        public void Apply(UpdateCandidate candidate) { if (ApplyError is not null) throw ApplyError; Applies++; }
+        public void Apply(UpdateCandidate candidate) { BeforeApply?.Invoke(); if (ApplyError is not null) throw ApplyError; Applies++; }
         public void Dispose() { }
     }
     private sealed class Restart : IUpdateRestartCoordinator
@@ -87,6 +88,40 @@ public sealed class UpdaterTests
         public ValueTask DisposeAsync() => Client.DisposeAsync();
     }
     private static UpdateCandidate CandidateFor(string version) => new("1.0.0", version, UpdateChannel.Stable, null, null, null, new object());
+
+    [Fact] public async Task PendingMarkerIsDurableBeforeApply() {
+        await using var f = new Fixture();
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        f.Restart.Decision = RestartDecision.Ready;
+        f.Engine.BeforeApply = () => Assert.Equal(candidate.TargetVersion, f.Store.Value.PendingInstallVersion);
+        Assert.Equal(InstallOutcome.RestartScheduled, await f.Client.InstallAsync(candidate));
+    }
+
+    [Fact] public async Task MarkerSaveFailurePreventsApplyAndRestoresHostForRetry() {
+        await using var f = new Fixture();
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        f.Restart.Decision = RestartDecision.Ready;
+        f.Store.Fail = true;
+        await Assert.ThrowsAsync<IOException>(() => f.Client.InstallAsync(candidate));
+        Assert.Equal(0, f.Engine.Applies);
+        Assert.Equal(1, f.Restart.Aborts);
+        Assert.Null(f.Client.Preferences.PendingInstallVersion);
+        f.Store.Fail = false;
+        Assert.Equal(InstallOutcome.RestartScheduled, await f.Client.RetryPendingRestartAsync());
+        Assert.Equal(1, f.Engine.Downloads);
+    }
+
+    [Fact] public async Task SynchronousApplyFailureClearsDurableMarker() {
+        await using var f = new Fixture();
+        var candidate = (await f.Client.CheckAsync(CheckOrigin.Manual)).Candidate!;
+        f.Restart.Decision = RestartDecision.Ready;
+        f.Engine.BeforeApply = () => Assert.Equal(candidate.TargetVersion, f.Store.Value.PendingInstallVersion);
+        f.Engine.ApplyError = new IOException("Cannot schedule");
+        await Assert.ThrowsAsync<IOException>(() => f.Client.InstallAsync(candidate));
+        Assert.Null(f.Store.Value.PendingInstallVersion);
+        Assert.Null(f.Client.Preferences.PendingInstallVersion);
+        Assert.Equal(1, f.Restart.Aborts);
+    }
 
     [Fact] public async Task DefaultsRequireConsentAndPersistAttemptThrottle() {
         await using var f = new Fixture();

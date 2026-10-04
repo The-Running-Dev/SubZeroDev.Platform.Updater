@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+& "$PSScriptRoot/Test-ReleaseTag.ps1"
 & "$PSScriptRoot/Test-PublishingGuards.ps1"
 dotnet test SubZeroDev.Platform.Updater.slnx -c Release
 if ($LASTEXITCODE) { throw 'Library tests failed.' }

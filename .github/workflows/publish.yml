@@ -12,17 +12,22 @@ jobs:
     environment: nuget
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
       - name: Verify release tag and license
         shell: pwsh
         run: |
+          ./scripts/Assert-ReleaseTag.ps1 -Ref $env:GITHUB_REF -DefaultBranch $env:DEFAULT_BRANCH
           $version = dotnet msbuild src/SubZeroDev.Platform.Updater/SubZeroDev.Platform.Updater.csproj -getProperty:Version
+          if ($LASTEXITCODE) { throw 'Could not read the package version.' }
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Run publication on the matching version tag.' }
           if (-not (Test-Path LICENSE)) { throw 'LICENSE is missing.' }
           if (-not $env:NUGET_USER) { throw 'Set the NUGET_USER variable in the nuget environment to the nuget.org account that owns the trusted publishing policy.' }
         env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           NUGET_USER: ${{ vars.NUGET_USER }}
       - shell: pwsh
         run: ./scripts/Test-Package.ps1

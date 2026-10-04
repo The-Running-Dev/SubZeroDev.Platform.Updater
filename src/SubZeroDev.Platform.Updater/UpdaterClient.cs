@@ -40,8 +40,13 @@ public sealed class UpdaterClient : IUpdaterClient
 
     internal UpdaterClient(UpdaterOptions options, IUpdateEngine engine, IPreferencesStore store, IUpdateRestartCoordinator restart,
         UpdaterPreferences preferences, TimeProvider? clock = null, Action<string>? log = null)
-        => (this.options, this.engine, this.store, this.restart, this.preferences, this.clock, this.log) =
+    {
+        (this.options, this.engine, this.store, this.restart, this.preferences, this.clock, this.log) =
             (options, engine, store, restart, preferences, clock ?? TimeProvider.System, log);
+        var now = this.clock.GetUtcNow();
+        if (preferences.AutomaticBackoffUntilUtc is { } saved && saved > now)
+            automaticBackoffUntil = saved < now.AddHours(1) ? saved : now.AddHours(1);
+    }
 
     /// <summary>The longest disposal waits for outstanding work before abandoning it.</summary>
     internal TimeSpan ShutdownTimeout { get; init; } = TimeSpan.FromSeconds(10);
@@ -195,7 +200,7 @@ public sealed class UpdaterClient : IUpdaterClient
             }
             var candidate = await engine.CheckAsync(Preferences.Channel, token).ConfigureAwait(false);
             lock (sync) automaticBackoffUntil = null;
-            await RecordAsync(p => p with { LastSuccessfulCheckUtc = clock.GetUtcNow() }, token).ConfigureAwait(false);
+            await RecordAsync(p => p with { LastSuccessfulCheckUtc = clock.GetUtcNow(), AutomaticBackoffUntilUtc = null }, token).ConfigureAwait(false);
             if (candidate is not null) lock (sync) {
                 candidates.Add(candidate);
                 if (candidates.Count > MaximumRememberedCandidates) candidates.RemoveAt(0);
@@ -211,9 +216,12 @@ public sealed class UpdaterClient : IUpdaterClient
                 _ => CheckOutcomeKind.InvalidRelease
             };
             if (kind == CheckOutcomeKind.RateLimited) {
-                // Honour Retry-After, but never wait less than the normal interval or more than an hour.
-                var wait = TimeSpan.FromTicks(Math.Clamp((ex as RateLimitedException)?.RetryAfter?.Ticks ?? 0, options.MinimumAutomaticCheckInterval.Ticks, TimeSpan.FromHours(1).Ticks));
-                lock (sync) automaticBackoffUntil = clock.GetUtcNow() + wait;
+                // Cap persisted server backoff at an hour; the normal automatic interval is enforced separately.
+                var wait = TimeSpan.FromTicks(Math.Min(Math.Max((ex as RateLimitedException)?.RetryAfter?.Ticks ?? 0,
+                    options.MinimumAutomaticCheckInterval.Ticks), TimeSpan.FromHours(1).Ticks));
+                var until = clock.GetUtcNow() + wait;
+                lock (sync) automaticBackoffUntil = until;
+                await RecordAsync(p => p with { AutomaticBackoffUntilUtc = until }, CancellationToken.None).ConfigureAwait(false);
             }
             // Exception text can carry local paths and server detail, so users only see these fixed messages.
             var message = kind switch {
@@ -301,7 +309,18 @@ public sealed class UpdaterClient : IUpdaterClient
             }
             if (remember) await ChangePreferencesAsync(p => p with { ConsentMode = ConsentMode.InstallAutomatically }, token).ConfigureAwait(false);
             Publish(new(UpdateStage.Downloading, candidate, 0));
-            await engine.DownloadAsync(candidate, p => Publish(new(UpdateStage.Downloading, candidate, Math.Clamp(p, 0, 100))), token).ConfigureAwait(false);
+            var progressGate = new object();
+            int lastProgress = 0;
+            void ReportProgress(int value) {
+                lock (progressGate) {
+                    int percent = Math.Clamp(value, 0, 100);
+                    if (percent <= lastProgress) return;
+                    lastProgress = percent;
+                    Publish(new(UpdateStage.Downloading, candidate, percent));
+                }
+            }
+            await engine.DownloadAsync(candidate, ReportProgress, token).ConfigureAwait(false);
+            ReportProgress(100);
             pending = candidate;
             Publish(new(UpdateStage.AwaitingRestart, candidate));
             return await RestartCoreAsync(token).ConfigureAwait(false);

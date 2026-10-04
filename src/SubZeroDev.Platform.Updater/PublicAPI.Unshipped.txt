@@ -1,3 +1,5 @@
 #nullable enable
+SubZeroDev.Platform.Updater.UpdaterPreferences.AutomaticBackoffUntilUtc.get -> System.DateTimeOffset?
+SubZeroDev.Platform.Updater.UpdaterPreferences.AutomaticBackoffUntilUtc.init -> void
 SubZeroDev.Platform.Updater.UpdaterOptions.PackageDownloadTimeout.get -> System.TimeSpan
 SubZeroDev.Platform.Updater.UpdaterOptions.PackageDownloadTimeout.init -> void

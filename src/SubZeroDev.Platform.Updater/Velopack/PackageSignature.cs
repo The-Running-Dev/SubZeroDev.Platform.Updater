@@ -23,8 +23,16 @@ internal static class PackageSignature
     {
         var ecdsa = ECDsa.Create();
         try {
-            if (key.Contains("-----BEGIN", StringComparison.Ordinal)) ecdsa.ImportFromPem(key);
-            else ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(key.Trim()), out _);
+            var encoded = key.Trim();
+            if (encoded.Contains("-----BEGIN", StringComparison.Ordinal)) {
+                const string begin = "-----BEGIN PUBLIC KEY-----", end = "-----END PUBLIC KEY-----";
+                if (!encoded.StartsWith(begin, StringComparison.Ordinal) || !encoded.EndsWith(end, StringComparison.Ordinal))
+                    throw new ArgumentException("Only PUBLIC KEY PEM is accepted; private keys must not be configured.", nameof(key));
+                encoded = encoded[begin.Length..^end.Length];
+            }
+            var bytes = Convert.FromBase64String(encoded);
+            ecdsa.ImportSubjectPublicKeyInfo(bytes, out var read);
+            if (read != bytes.Length) throw new ArgumentException("The public key contains trailing data.", nameof(key));
             var parameters = ecdsa.ExportParameters(includePrivateParameters: false);
             if (parameters.Curve.Oid.Value != ECCurve.NamedCurves.nistP256.Oid.Value)
                 throw new ArgumentException("The package signing key must be an ECDSA P-256 public key.", nameof(key));

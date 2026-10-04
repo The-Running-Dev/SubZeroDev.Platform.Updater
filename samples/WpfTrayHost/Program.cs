@@ -30,6 +30,7 @@ internal sealed class TrayHost : IUpdateRestartCoordinator, IDisposable
     private readonly Application application;
     private readonly Forms.NotifyIcon icon = new() { Icon = System.Drawing.SystemIcons.Application, Text = "WPF tray updater host", Visible = true };
     private readonly Forms.ToolStripMenuItem status = new("Ready") { Enabled = false };
+    private readonly Forms.ToolStripMenuItem lastInstall = new() { Enabled = false, Visible = false };
     private readonly Forms.ToolStripMenuItem check = new("Check for updates…");
     private readonly Forms.ToolStripMenuItem automatic = new("Automatically check for updates");
     private readonly Forms.ToolStripMenuItem stable = new("Stable channel");
@@ -43,7 +44,7 @@ internal sealed class TrayHost : IUpdateRestartCoordinator, IDisposable
     {
         this.application = application;
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.AddRange([status, new Forms.ToolStripSeparator(), check, install, remember, new Forms.ToolStripSeparator(), automatic, stable, preview,
+        menu.Items.AddRange([status, lastInstall, new Forms.ToolStripSeparator(), check, install, remember, new Forms.ToolStripSeparator(), automatic, stable, preview,
             new Forms.ToolStripSeparator(), new Forms.ToolStripMenuItem("Quit", null, (_, _) => application.Shutdown())]);
         icon.ContextMenuStrip = menu;
         check.Click += async (_, _) => await CheckNowAsync();
@@ -67,6 +68,7 @@ internal sealed class TrayHost : IUpdateRestartCoordinator, IDisposable
                         ?? (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } ? null
                             : throw new InvalidOperationException("Build with UpdaterPackageSigningKey before enabling updates."))
                 }, this);
+            if (updater.LastInstallOutcome is { } outcome) { lastInstall.Text = outcome.Message; lastInstall.Visible = true; }
             // StateChanged has no thread guarantee; the menu belongs to the dispatcher thread.
             updater.StateChanged += (_, state) => application.Dispatcher.BeginInvoke(() => {
                 status.Text = state.Message ?? $"{state.Stage} {state.DownloadPercent}".Trim();

@@ -33,7 +33,18 @@ function New-PackageSignatures([string]$AssetsDirectory, [string]$AppId, [string
 function Assert-PackageSignatures([string]$AssetsDirectory, [string]$AppId, [string]$Channel, [string]$PublicKey) {
     $key = [ECDsa]::Create()
     try {
-        if ($PublicKey.Contains('-----BEGIN')) { $key.ImportFromPem($PublicKey) } else { $read = 0; $key.ImportSubjectPublicKeyInfo([Convert]::FromBase64String($PublicKey.Trim()), [ref]$read) }
+        $encoded = $PublicKey.Trim()
+        if ($encoded.Contains('-----BEGIN')) {
+            $begin = '-----BEGIN PUBLIC KEY-----'; $end = '-----END PUBLIC KEY-----'
+            if (-not $encoded.StartsWith($begin, [StringComparison]::Ordinal) -or -not $encoded.EndsWith($end, [StringComparison]::Ordinal)) {
+                throw 'Only PUBLIC KEY PEM is accepted; private keys must not be configured.'
+            }
+            $encoded = $encoded.Substring($begin.Length, $encoded.Length - $begin.Length - $end.Length)
+        }
+        $bytes = [Convert]::FromBase64String($encoded)
+        $read = 0
+        $key.ImportSubjectPublicKeyInfo($bytes, [ref]$read)
+        if ($read -ne $bytes.Length) { throw 'The public key contains trailing data.' }
         Assert-P256 $key 'public'
         foreach ($asset in Get-FullPackageAssets $AssetsDirectory $Channel) {
             $path = Join-Path $AssetsDirectory "$($asset.FileName).sig"

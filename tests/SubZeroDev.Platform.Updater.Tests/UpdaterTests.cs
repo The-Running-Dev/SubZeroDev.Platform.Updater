@@ -260,11 +260,28 @@ public sealed class UpdaterTests
         await using var f = new Fixture(new() { ConsentMode = ConsentMode.InstallAutomatically });
         Assert.False((await f.Client.StartAutomaticCheckAsync()).ShouldPrompt);
         Assert.Equal(UpdateStage.AwaitingRestart, f.Client.State.Stage);
-        f.Clock.Now += TimeSpan.FromMinutes(16);
         f.Engine.Candidate = CandidateFor("2.1.0");
         var result = await f.Client.StartAutomaticCheckAsync();
+        Assert.Equal(CheckOutcomeKind.UpdateInProgress, result.Kind);
+        Assert.Equal("2.0.0", result.Candidate?.TargetVersion);
         Assert.False(result.ShouldPrompt);
+        f.Clock.Now += TimeSpan.FromMinutes(16);
+        Assert.Equal(CheckOutcomeKind.UpdateInProgress, (await f.Client.StartAutomaticCheckAsync()).Kind);
         Assert.Equal(1, f.Engine.Downloads);
+    }
+    [Fact] public async Task ChecksDuringAutomaticInstallReturnImmediately() {
+        await using var f = new Fixture(new() { ConsentMode = ConsentMode.InstallAutomatically });
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<RestartDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Restart.Respond = _ => { entered.TrySetResult(); return release.Task; };
+        var automatic = f.Client.StartAutomaticCheckAsync();
+        await entered.Task;
+        var result = await f.Client.CheckAsync(CheckOrigin.Manual).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(CheckOutcomeKind.UpdateInProgress, result.Kind);
+        Assert.False(result.ShouldPrompt);
+        Assert.Equal("2.0.0", result.Candidate?.TargetVersion);
+        release.SetResult(RestartDecision.Defer);
+        await automatic;
     }
     [Fact] public async Task ApplyFailureAfterReadyRestoresHostAndKeepsRetry() {
         await using var f = new Fixture();
@@ -367,6 +384,13 @@ public sealed class UpdaterTests
         }
         await using var f = new Fixture(new() { PendingInstallVersion = "2.0.0" });
         f.Engine.CurrentVersion = "2.0.0";
+        await f.Client.VerifyLastInstallAsync();
+        Assert.Null(f.Store.Value.PendingInstallVersion);
+        Assert.Equal(UpdateStage.Idle, f.Client.State.Stage);
+    }
+    [Fact] public async Task NewerRunningVersionAlsoConfirmsScheduledInstall() {
+        await using var f = new Fixture(new() { PendingInstallVersion = "2.0.0" });
+        f.Engine.CurrentVersion = "2.1.0";
         await f.Client.VerifyLastInstallAsync();
         Assert.Null(f.Store.Value.PendingInstallVersion);
         Assert.Equal(UpdateStage.Idle, f.Client.State.Stage);

@@ -113,6 +113,15 @@ internal sealed class VelopackEngine : IUpdateEngine
             throw new FileNotFoundException("The Velopack updater executable is missing.");
         if (locator.PackagesDir is not { } packages || !File.Exists(Path.Combine(packages, selected.Update.TargetFullRelease.FileName)))
             throw new FileNotFoundException("The staged update package is missing.");
+        // A deferred restart may happen much later; do not trust the package merely because it was valid at download time.
+        VerifyStagedPackageHash(Path.Combine(packages, selected.Update.TargetFullRelease.FileName), selected.Update.TargetFullRelease.SHA256);
+    }
+
+    internal static void VerifyStagedPackageHash(string path, string expectedHash)
+    {
+        using var file = File.OpenRead(path);
+        if (!string.Equals(Convert.ToHexString(SHA256.HashData(file)), expectedHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The staged update package no longer matches the selected release hash.");
     }
 
     public void Apply(UpdateCandidate candidate)

@@ -78,7 +78,9 @@ public sealed class UpdaterClient : IUpdaterClient
     internal async Task VerifyLastInstallAsync()
     {
         if (Preferences.PendingInstallVersion is not { } expected || engine.CurrentVersion is not { } current) return;
-        if (string.Equals(current, expected, StringComparison.OrdinalIgnoreCase)) {
+        // A later update may have superseded the scheduled one before this process started.
+        if (Velopack.SemanticVersion.TryParse(current, out var running) &&
+            Velopack.SemanticVersion.TryParse(expected, out var scheduled) && running >= scheduled) {
             Log($"update-verified version={expected}");
             await RecordAsync(p => p with { PendingInstallVersion = null }, CancellationToken.None).ConfigureAwait(false);
             return;
@@ -120,8 +122,14 @@ public sealed class UpdaterClient : IUpdaterClient
         Task<CheckResult> task;
         lock (sync) {
             ObjectDisposedException.ThrowIf(disposed, this);
+            if (installing is { IsCompleted: false })
+                return new(CheckOutcomeKind.UpdateInProgress, installingCandidate, "An update is being installed.");
             if (checking is { IsCompleted: false }) task = checking;
             else {
+                // A staged update remains actionable even when the automatic network interval has not elapsed.
+                if (applied is { } done) return new(CheckOutcomeKind.UpdateInProgress, done, "Exit the application to finish applying the update.");
+                if (pending is { } staged) return new(CheckOutcomeKind.UpdateInProgress, staged,
+                    "An update is ready to install when the application restarts.", ShouldPrompt: origin == CheckOrigin.Manual);
                 if (origin == CheckOrigin.Automatic) {
                     if (!Preferences.CheckAutomatically) return new(CheckOutcomeKind.AutomaticCheckDisabled);
                     // The in-memory attempt still throttles when the persisted one could not be saved.

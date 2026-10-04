@@ -81,6 +81,20 @@ public sealed class EngineTests
         } finally { Directory.Delete(directory, true); }
     }
 
+    [Fact] public async Task TamperedStagedPackageIsRejectedBeforeHostQuiesces()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "updater-staged-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try {
+            var package = Path.Combine(directory, "Example-1.1.0-full.nupkg");
+            var expected = Convert.ToHexString(SHA256.HashData(new byte[] { 1, 2, 3, 4 }));
+            await File.WriteAllBytesAsync(package, [4, 3, 2, 1]);
+            Assert.Throws<InvalidDataException>(() => VelopackEngine.VerifyStagedPackageHash(package, expected));
+            await File.WriteAllBytesAsync(package, [1, 2, 3, 4]);
+            VelopackEngine.VerifyStagedPackageHash(package, expected);
+        } finally { Directory.Delete(directory, true); }
+    }
+
     private sealed class SignedSource(Func<VelopackAsset, byte[]?> signature, params string[] versions) : IUpdateSource, IPackageSignatureSource
     {
         private readonly Source inner = new(versions);

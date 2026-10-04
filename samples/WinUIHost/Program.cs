@@ -53,10 +53,10 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
     public Task<RestartDecision> RequestRestartAsync(CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<RestartDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
-        window!.DispatcherQueue.TryEnqueue(() => {
+        if (!window!.DispatcherQueue.TryEnqueue(() => {
             foreach (var control in ((StackPanel)window.Content).Children.OfType<Control>()) control.IsEnabled = false;
             completion.SetResult(RestartDecision.Ready);
-        });
+        })) completion.SetResult(RestartDecision.Defer);
         return completion.Task.WaitAsync(cancellationToken);
     }
     public Task RestartAbortedAsync()

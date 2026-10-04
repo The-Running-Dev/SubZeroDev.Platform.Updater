@@ -1,0 +1,9 @@
+<Project>
+  <!-- Embed a public key in the executable; never obtain trust from the release being checked. -->
+  <ItemGroup Condition="'$(UpdaterPackageSigningKey)' != ''">
+    <AssemblyMetadata Include="UpdaterPackageSigningKey" Value="$(UpdaterPackageSigningKey)" />
+  </ItemGroup>
+  <Target Name="RequireSamplePublisherKey" BeforeTargets="Publish">
+    <Error Condition="'$(UpdaterPackageSigningKey)' == ''" Text="Publishing a sample requires -p:UpdaterPackageSigningKey=&lt;base64 SubjectPublicKeyInfo&gt;. Use the public key matching the publisher signing key." />
+  </Target>
+</Project>

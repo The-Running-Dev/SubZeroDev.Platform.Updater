@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+& "$PSScriptRoot/Test-PublishingGuards.ps1"
 dotnet test SubZeroDev.Platform.Updater.slnx -c Release
 if ($LASTEXITCODE) { throw 'Library tests failed.' }
 dotnet pack src/SubZeroDev.Platform.Updater -c Release -p:ContinuousIntegrationBuild=true -o artifacts/packages

@@ -9,6 +9,36 @@ namespace SubZeroDev.Platform.Updater.Tests;
 
 public sealed class EngineTests
 {
+    private sealed class SlowHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+            await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("[]") };
+        }
+    }
+
+    [Fact] public async Task WholeSearchDeadlineDoesNotReportUpToDate()
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused") { NetworkTimeout = TimeSpan.FromSeconds(20) },
+            new TestVelopackLocator("Example", "1.0.0", Path.GetTempPath()), handler: new SlowHandler()) { CheckTimeout = TimeSpan.FromMilliseconds(100) };
+        await Assert.ThrowsAsync<TimeoutException>(() => engine.CheckAsync(UpdateChannel.Preview, default));
+    }
+
+    [Fact] public void SearchDeadlineFitsLongNetworkTimeout()
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused") { NetworkTimeout = TimeSpan.FromMinutes(5) },
+            new TestVelopackLocator("Example", "1.0.0", Path.GetTempPath()));
+        Assert.Equal(TimeSpan.FromMinutes(10), engine.CheckTimeout);
+    }
+
+    [Fact] public async Task SearchCallerCancellationRemainsCancellation()
+    {
+        using var engine = new VelopackEngine(new("Example", new("https://github.com/example/app"), "unused"),
+            new TestVelopackLocator("Example", "1.0.0", Path.GetTempPath()), handler: new SlowHandler());
+        using var caller = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => engine.CheckAsync(UpdateChannel.Preview, caller.Token));
+    }
+
     private sealed class Source(params string[] versions) : IUpdateSource
     {
         public Task<VelopackAssetFeed> GetReleaseFeed(IVelopackLogger logger, string? appId, string channel, Guid? stagingId = null, VelopackAsset? latestLocalRelease = null)

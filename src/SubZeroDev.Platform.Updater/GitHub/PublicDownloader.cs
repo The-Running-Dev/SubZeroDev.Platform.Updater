@@ -26,10 +26,12 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
             .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion.Split('+')[0] ?? "0");
     private readonly HttpClient client;
     private readonly TimeSpan timeout;
+    private readonly TimeSpan packageDownloadTimeout;
 
-    internal PublicDownloader(TimeSpan timeout, HttpMessageHandler? handler = null)
+    internal PublicDownloader(TimeSpan timeout, HttpMessageHandler? handler = null, TimeSpan? packageDownloadTimeout = null)
     {
         this.timeout = timeout;
+        this.packageDownloadTimeout = packageDownloadTimeout ?? TimeSpan.FromMinutes(30);
         // Redirects are followed by SendAsync so every hop is checked against the GitHub allowlist.
         client = new(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
     }
@@ -86,9 +88,11 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
     }
 
     // The timeout bounds the wait for response headers and, through the restart callback, each stall while reading the body.
-    private async Task<T> RequestAsync<T>(string url, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume)
+    private async Task<T> RequestAsync<T>(string url, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume, TimeSpan? totalTimeout = null)
     {
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra);
+        using var deadline = totalTimeout is { } total ? new CancellationTokenSource(total) : null;
+        using var linked = deadline is null ? CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra)
+            : CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra, deadline.Token);
         linked.CancelAfter(timeout);
         try {
             using var response = await SendAsync(url, linked.Token).ConfigureAwait(false);
@@ -116,7 +120,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
         System.Text.Encoding.UTF8.GetString(await DownloadBytes(url, headers, timeout).ConfigureAwait(false));
 
     public Task DownloadFile(string url, string targetFile, Action<int> progress, IDictionary<string, string>? headers = null, double timeout = 30, CancellationToken cancelToken = default) =>
-        // Packages can be large, so the deadline restarts whenever data arrives and only a stalled transfer times out.
+        // Progress resets the stall timer, while a separate total deadline bounds a trickling transfer.
         RequestAsync(url, cancelToken, async (r, token, progressed) => {
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             await using var output = new FileStream(targetFile, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
@@ -132,7 +136,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
             }
             progress(100);
             return true;
-        });
+        }, packageDownloadTimeout);
 
     public void Dispose() => client.Dispose();
 }

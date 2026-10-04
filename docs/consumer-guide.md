@@ -27,7 +27,7 @@ static void Main()
 var updater = await UpdaterClient.CreateAsync(
     new UpdaterOptions("Contoso.App", new Uri("https://github.com/contoso/App.Releases"), settingsDirectory)
     {
-        PackageSigningKey = publisherPublicKey,   // strongly recommended
+        PackageSigningKey = publisherPublicKey,   // required for production distributions
     },
     restartCoordinator);
 updater.StateChanged += (_, state) => dispatcher.BeginInvoke(() => Render(state));
@@ -93,3 +93,5 @@ HTTPS to `api.github.com`, `github.com` and `*.githubusercontent.com` only, with
 - [`samples/WinUIHost`](../samples/WinUIHost): WinUI 3 window.
 
 Both restore the package from `artifacts/packages` or nuget.org and are built by `scripts/Test-Package.ps1`. They are not in the solution file, which lists only `src` and `tests`.
+
+`NetworkTimeout` bounds response waits and package stalls (30 seconds by default). `PackageDownloadTimeout` separately bounds the entire package transfer, including redirects and retries (30 minutes by default, configurable up to 24 hours). Incoming data resets only the stall timer.

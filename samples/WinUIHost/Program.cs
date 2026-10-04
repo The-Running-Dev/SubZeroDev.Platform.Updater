@@ -34,7 +34,12 @@ internal sealed class HostApplication : Application, IUpdateRestartCoordinator
         // Async void handler: an escaping exception would terminate the app, so report it instead.
         try {
             var client = await UpdaterClient.CreateAsync(new("SubZeroDev.UpdaterProbe", new("https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Releases"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWinUISample")), this);
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UpdaterWinUISample")) {
+                    PackageSigningKey = System.Reflection.CustomAttributeExtensions.GetCustomAttributes<System.Reflection.AssemblyMetadataAttribute>(typeof(Program).Assembly)
+                        .FirstOrDefault(a => a.Key == "UpdaterPackageSigningKey")?.Value
+                        ?? (Environment.GetEnvironmentVariable("UPDATER_SAMPLE_SMOKE") is { Length: > 0 } ? null
+                            : throw new InvalidOperationException("Build with UpdaterPackageSigningKey before enabling updates."))
+                }, this);
             client.StateChanged += (_, state) => window.DispatcherQueue.TryEnqueue(() => {
                 status.Text = $"{state.Stage} {state.DownloadPercent}";
                 if (state.Stage == UpdateStage.Completed) window.Close();

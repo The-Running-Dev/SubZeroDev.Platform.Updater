@@ -58,7 +58,8 @@ public sealed class UpdaterClient : IUpdaterClient
             options.PublicReleaseRepository.UserInfo.Length != 0 ||
             options.PublicReleaseRepository.AbsolutePath.TrimEnd('/').EndsWith(".git", StringComparison.OrdinalIgnoreCase) || options.PublicReleaseRepository.Query.Length != 0 || options.PublicReleaseRepository.Fragment.Length != 0)
             throw new ArgumentException("Use a public https://github.com/owner/repository URL.");
-        if (options.MinimumAutomaticCheckInterval < TimeSpan.FromMinutes(15) || options.NetworkTimeout <= TimeSpan.Zero || options.NetworkTimeout > TimeSpan.FromMinutes(5))
+        if (options.MinimumAutomaticCheckInterval < TimeSpan.FromMinutes(15) || options.NetworkTimeout <= TimeSpan.Zero || options.NetworkTimeout > TimeSpan.FromMinutes(5) ||
+            options.PackageDownloadTimeout <= TimeSpan.Zero || options.PackageDownloadTimeout > TimeSpan.FromHours(24))
             throw new ArgumentOutOfRangeException(nameof(options));
         var store = new PreferencesStore(options.SettingsDirectory, diagnostic);
         var preferences = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
@@ -348,12 +349,17 @@ public sealed class UpdaterClient : IUpdaterClient
         if (decision == RestartDecision.Defer) return InstallOutcome.Deferred;
         // The host has released its resources, so cancellation no longer applies: apply, or give the host back its resources.
         Publish(new(UpdateStage.Applying, candidate));
-        try { engine.Apply(candidate); }
+        // Applying can schedule process exit. Commit recovery evidence before allowing that side effect.
+        try { await ChangePreferencesAsync(p => p with { PendingInstallVersion = candidate.TargetVersion }, CancellationToken.None).ConfigureAwait(false); }
         catch { await RestoreHostAsync().ConfigureAwait(false); throw; }
+        try { engine.Apply(candidate); }
+        catch {
+            try { await RecordAsync(p => p with { PendingInstallVersion = null }, CancellationToken.None).ConfigureAwait(false); }
+            finally { await RestoreHostAsync().ConfigureAwait(false); }
+            throw;
+        }
         applied = candidate;
         pending = null;
-        // Checked by the next process, so an apply that fails after this one exits is reported rather than lost.
-        await RecordAsync(p => p with { PendingInstallVersion = candidate.TargetVersion }, CancellationToken.None).ConfigureAwait(false);
         Publish(new(UpdateStage.Completed, candidate));
         return InstallOutcome.RestartScheduled;
     }

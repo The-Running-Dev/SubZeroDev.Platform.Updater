@@ -94,6 +94,8 @@ public sealed record UpdaterPreferences
     public ConsentMode ConsentMode { get; init; }
     /// <summary>The last automatic network attempt, including failures.</summary>
     public DateTimeOffset? LastAutomaticNetworkCheckUtc { get; init; }
+    /// <summary>GitHub's automatic-check backoff deadline; restored with a maximum remaining wait of one hour.</summary>
+    public DateTimeOffset? AutomaticBackoffUntilUtc { get; init; }
     /// <summary>The last completed successful check.</summary>
     public DateTimeOffset? LastSuccessfulCheckUtc { get; init; }
     /// <summary>The version most recently offered or deferred.</summary>

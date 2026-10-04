@@ -120,15 +120,20 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
     }
 
     // The timeout bounds the wait for response headers and, through the restart callback, each stall while reading the body.
-    private async Task<T> RequestAsync<T>(string url, IDictionary<string, string>? headers, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume, TimeSpan? totalTimeout = null)
+    private async Task<T> RequestAsync<T>(string url, IDictionary<string, string>? headers, double timeoutMinutes, CancellationToken extra, Func<HttpResponseMessage, CancellationToken, Action, Task<T>> consume, TimeSpan? totalTimeout = null)
     {
-        using var deadline = totalTimeout is { } total ? new CancellationTokenSource(total) : null;
-        using var linked = deadline is null ? CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra)
-            : CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra, deadline.Token);
-        linked.CancelAfter(timeout);
+        // IFileDownloader specifies minutes and a maximum completion time, including for metadata.
+        if (!double.IsFinite(timeoutMinutes) || timeoutMinutes <= 0 || timeoutMinutes > TimeSpan.FromMilliseconds(uint.MaxValue - 1).TotalMinutes)
+            throw new ArgumentOutOfRangeException(nameof(timeoutMinutes));
+        var callerTimeout = TimeSpan.FromMinutes(timeoutMinutes);
+        var stallTimeout = callerTimeout < timeout ? callerTimeout : timeout;
+        var total = totalTimeout is { } configured && configured < callerTimeout ? configured : callerTimeout;
+        using var deadline = new CancellationTokenSource(total);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(OperationToken, extra, deadline.Token);
+        linked.CancelAfter(stallTimeout);
         try {
             using var response = await SendAsync(url, headers, linked.Token).ConfigureAwait(false);
-            return await consume(response, linked.Token, () => linked.CancelAfter(timeout)).ConfigureAwait(false);
+            return await consume(response, linked.Token, () => linked.CancelAfter(stallTimeout)).ConfigureAwait(false);
         } catch (OperationCanceledException) when (!OperationToken.IsCancellationRequested && !extra.IsCancellationRequested) {
             throw new TimeoutException("The update request timed out.");
         }
@@ -136,7 +141,7 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
 
     public Task<byte[]> DownloadBytes(string url, IDictionary<string, string>? headers = null, double timeout = 30) =>
         // Metadata is small, so one deadline covers the whole response.
-        RequestAsync(url, headers, default, async (r, token, _) => {
+        RequestAsync(url, headers, timeout, default, async (r, token, _) => {
             if (r.Content.Headers.ContentLength > 8 * 1024 * 1024) throw new InvalidDataException("Release metadata is too large.");
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             using var output = new MemoryStream();
@@ -153,18 +158,23 @@ internal sealed class PublicDownloader : IFileDownloader, ISizeLimitedDownloader
 
     public Task DownloadFile(string url, string targetFile, Action<int> progress, IDictionary<string, string>? headers = null, double timeout = 30, CancellationToken cancelToken = default) =>
         // Progress resets the stall timer, while a separate total deadline bounds a trickling transfer.
-        RequestAsync(url, headers, cancelToken, async (r, token, progressed) => {
+        RequestAsync(url, headers, timeout, cancelToken, async (r, token, progressed) => {
             await using var input = await r.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             await using var output = new FileStream(targetFile, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
             long total = r.Content.Headers.ContentLength ?? 0;
             long? limit = MaximumDownloadBytes;
             if (limit is { } declared && total > declared) throw new InvalidDataException("The package is larger than its release declares.");
             byte[] buffer = new byte[81920]; int count;
+            int lastProgress = -1;
             while ((count = await input.ReadAsync(buffer, token).ConfigureAwait(false)) > 0) {
                 if (limit is { } maximum && output.Length + count > maximum) throw new InvalidDataException("The package is larger than its release declares.");
                 progressed();
                 await output.WriteAsync(buffer.AsMemory(0, count), token).ConfigureAwait(false);
-                if (total > 0) progress((int)Math.Min(100, output.Length * 100 / total));
+                if (total > 0) {
+                    // Reserve completion for EOF, even when Content-Length understates the body.
+                    int percent = (int)Math.Min(99, (double)output.Length / total * 100);
+                    if (percent > lastProgress) { lastProgress = percent; progress(percent); }
+                }
             }
             progress(100);
             return true;

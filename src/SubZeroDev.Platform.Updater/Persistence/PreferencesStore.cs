@@ -55,6 +55,7 @@ internal sealed class PreferencesStore(string directory, Action<string>? log) : 
             Channel = Enum.IsDefined(channel) ? channel : defaults.Channel,
             ConsentMode = Enum.IsDefined(consent) ? consent : defaults.ConsentMode,
             LastAutomaticNetworkCheckUtc = Field<DateTimeOffset?>("lastAutomaticNetworkCheckUtc", null),
+            AutomaticBackoffUntilUtc = Field<DateTimeOffset?>("automaticBackoffUntilUtc", null),
             LastSuccessfulCheckUtc = Field<DateTimeOffset?>("lastSuccessfulCheckUtc", null),
             LastOfferedVersion = Field<string?>("lastOfferedVersion", null),
             OfferDeferredUntilUtc = Field<DateTimeOffset?>("offerDeferredUntilUtc", null),

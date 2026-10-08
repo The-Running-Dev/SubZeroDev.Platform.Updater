@@ -67,6 +67,42 @@ public sealed class GithubFeedTests
         Assert.Single((await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets);
         Assert.Equal(3, d.Requests.Count);
     }
+
+    [Fact] public async Task FindsStableBeyondThreeHundredPreviews()
+    {
+        var d = new Downloader();
+        for (int page = 1; page <= 3; page++)
+            d.Responses[$"https://api.github.com/repos/example/app/releases?per_page=100&page={page}"] =
+                JsonSerializer.Serialize(Enumerable.Range((page - 1) * 100 + 1, 100).Select(n => Release($"v2.0.0-preview.{n}", preview: true)));
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=4"] = JsonSerializer.Serialize(new[] { Release("v1.1.0") });
+        d.Responses["https://github.com/example/app/releases/download/v1.1.0/releases.win-stable.json"] = Feed("1.1.0");
+        Assert.Equal("1.1.0", Assert.Single((await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets).Version.ToString());
+        Assert.Equal(5, d.Requests.Count);
+    }
+
+    [Fact] public async Task FullLastPageFollowedByEmptyPageIsExhausted()
+    {
+        var d = new Downloader();
+        for (int page = 1; page <= 5; page++)
+            d.Responses[$"https://api.github.com/repos/example/app/releases?per_page=100&page={page}"] =
+                JsonSerializer.Serialize(Enumerable.Range((page - 1) * 100 + 1, 100).Select(n => Release($"v2.0.0-preview.{n}", preview: true)));
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=6"] = "[]";
+        Assert.Empty((await Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable")).Assets);
+        Assert.Equal(6, d.Requests.Count);
+    }
+
+    [Fact] public async Task MoreThanFiveHundredEntriesMakesSearchIncomplete()
+    {
+        var d = new Downloader();
+        for (int page = 1; page <= 5; page++)
+            d.Responses[$"https://api.github.com/repos/example/app/releases?per_page=100&page={page}"] =
+                JsonSerializer.Serialize(page == 1
+                    ? new[] { Release("v1.1.0") }.Concat(Enumerable.Range(1, 99).Select(n => Release($"v2.0.0-preview.{n}", preview: true)))
+                    : Enumerable.Range((page - 1) * 100 + 1, 100).Select(n => Release($"v2.0.0-preview.{n}", preview: true)));
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=6"] = JsonSerializer.Serialize(new[] { Release("v1.2.0") });
+        await Assert.ThrowsAsync<ReleaseSearchIncompleteException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
+        Assert.Equal(6, d.Requests.Count);
+    }
     [Fact] public async Task MalformedReleasesAreSkippedWhenValidReleasesRemain()
     {
         var d = new Downloader();
@@ -114,9 +150,10 @@ public sealed class GithubFeedTests
         var tags = Enumerable.Range(1, 300).Select(n => $"v1.{n}.0").ToArray();
         for (int page = 1; page <= 3; page++)
             d.Responses[$"https://api.github.com/repos/example/app/releases?per_page=100&page={page}"] = JsonSerializer.Serialize(tags.Skip((page - 1) * 100).Take(100).Select(t => Release(t)));
+        d.Responses["https://api.github.com/repos/example/app/releases?per_page=100&page=4"] = "[]";
         foreach (var tag in tags) d.Responses[$"https://github.com/example/app/releases/download/{tag}/releases.win-stable.json"] = Feed(tag[1..], hash: "bad");
         await Assert.ThrowsAsync<InvalidDataException>(() => Source(d).GetReleaseFeed(NullVelopackLogger.Instance, "Example", "win-stable"));
-        Assert.Equal(303, d.Requests.Count);
+        Assert.Equal(304, d.Requests.Count);
     }
 
     [Fact] public async Task RateLimitedFeedStopsSearchImmediately()

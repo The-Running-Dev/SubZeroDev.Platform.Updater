@@ -9,6 +9,8 @@ using Velopack.Sources;
 
 namespace SubZeroDev.Platform.Updater;
 
+internal sealed class ReleaseSearchIncompleteException : Exception;
+
 internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSource
 {
     private readonly UpdaterOptions options;
@@ -16,7 +18,7 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
     private readonly Action<string>? log;
     private readonly Dictionary<GithubRelease, (string Tag, DateTimeOffset? Published)> releases = [];
     private int rejectedReleases;
-    private const int MaximumReleasePages = 3;
+    private const int MaximumReleasePages = 5;
     private const int ReleasesPerPage = 100;
     internal ValidatedGithubSource(UpdaterOptions options, UpdateChannel stream, IFileDownloader downloader, Action<string>? log = null)
         : base(options.PublicReleaseRepository.ToString(), accessToken: null, prerelease: stream == UpdateChannel.Preview, downloader)
@@ -33,13 +35,17 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
         releases.Clear();
         rejectedReleases = 0;
         var result = new List<GithubRelease>();
-        // Bound work, but scan beyond GithubSource's default ten releases so busy preview streams don't hide stable releases.
-        for (int page = 1; page <= MaximumReleasePages; page++) {
+        // Read up to 500 entries, then probe one more page so a full final page is not mistaken for exhaustion.
+        for (int page = 1; page <= MaximumReleasePages + 1; page++) {
             string json;
             // Only the listing tells a missing repository apart; a missing asset stays a network failure.
             try { json = await Downloader.DownloadString($"https://api.github.com/repos{RepoUri.AbsolutePath}/releases?per_page={ReleasesPerPage}&page={page}").ConfigureAwait(false); }
             catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound) { throw new RepositoryNotFoundException(ex); }
             using var document = JsonDocument.Parse(json);
+            if (page > MaximumReleasePages) {
+                if (document.RootElement.GetArrayLength() > 0) throw new ReleaseSearchIncompleteException();
+                break;
+            }
             foreach (var element in document.RootElement.EnumerateArray().Take(ReleasesPerPage)) {
                 if (element.GetProperty("draft").GetBoolean()) continue;
                 bool preview = element.GetProperty("prerelease").GetBoolean();
@@ -65,7 +71,7 @@ internal sealed class ValidatedGithubSource : GithubSource, IPackageSignatureSou
     {
         // GitBase downloads every release's feed and fails on the first bad one. Each release's feed lists only its own
         // packages, so walking newest version first and stopping at the first valid full package finds the latest
-        // update with one download in the common case. The listing bounds worst-case work to 300 feeds.
+        // update with one download in the common case. The listing bounds worst-case work to 500 feeds.
         var newest = (await GetReleases(Prerelease).ConfigureAwait(false))
             .OrderByDescending(release => SemanticVersion.Parse(releases[release].Tag[1..]));
         bool attempted = rejectedReleases > 0;

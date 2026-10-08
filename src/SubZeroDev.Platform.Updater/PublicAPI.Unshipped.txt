@@ -1,5 +1,6 @@
 #nullable enable
 SubZeroDev.Platform.Updater.CheckOutcomeKind.AccessDenied = 11 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
+SubZeroDev.Platform.Updater.CheckOutcomeKind.ReleaseSearchIncomplete = 12 -> SubZeroDev.Platform.Updater.CheckOutcomeKind
 SubZeroDev.Platform.Updater.IUpdaterClient.LastInstallOutcome.get -> SubZeroDev.Platform.Updater.UpdaterState?
 SubZeroDev.Platform.Updater.UpdaterClient.LastInstallOutcome.get -> SubZeroDev.Platform.Updater.UpdaterState?
 SubZeroDev.Platform.Updater.UpdaterPreferences.AutomaticBackoffUntilUtc.get -> System.DateTimeOffset?

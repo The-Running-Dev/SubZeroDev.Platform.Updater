@@ -216,6 +216,7 @@ public sealed class UpdaterClient : IUpdaterClient
         } catch (OperationCanceledException) { Publish(new(UpdateStage.Idle)); return new(CheckOutcomeKind.Cancelled); }
         catch (Exception ex) {
             var kind = ex switch {
+                ReleaseSearchIncompleteException => CheckOutcomeKind.ReleaseSearchIncomplete,
                 RateLimitedException => CheckOutcomeKind.RateLimited,
                 HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } => CheckOutcomeKind.RateLimited,
                 HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized } => CheckOutcomeKind.AccessDenied,
@@ -233,6 +234,7 @@ public sealed class UpdaterClient : IUpdaterClient
             }
             // Exception text can carry local paths and server detail, so users only see these fixed messages.
             var message = kind switch {
+                CheckOutcomeKind.ReleaseSearchIncomplete => "The release list is too large to search completely, so update availability could not be determined.",
                 CheckOutcomeKind.RateLimited => "GitHub is limiting requests right now. Try again later.",
                 CheckOutcomeKind.AccessDenied => "GitHub denied access to the release. Check the repository's access restrictions.",
                 CheckOutcomeKind.RepositoryNotFound => "The release repository was not found. It may have been renamed or made private.",

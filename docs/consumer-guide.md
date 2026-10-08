@@ -82,7 +82,7 @@ Keep the private key apart from the token that writes releases. Rotation steps a
 - Stable: tag `vX.Y.Z`, Velopack channel `win-stable`. Preview: `vX.Y.Z-preview.N`, channel `win-preview`, marked prerelease. No leading zeros.
 - Each release has its own full package and `releases.<channel>.json`, plus the `.sig` file when signing. Every feed entry must match the tag and have its asset in that release.
 - The release title is the tag. Drafts and releases without a feed are ignored.
-- Clients read at most the five newest releases per stream and use the newest valid one.
+- Clients inspect up to 500 release entries per stream (five pages of 100), then check whether the listing is exhausted. They use the newest valid release found. If more entries remain, a check returns `ReleaseSearchIncomplete` instead of `UpToDate` or an update candidate.
 
 `scripts/Pack-Application.ps1` and `scripts/Publish-Release.ps1` implement this; see [release-guide.md](release-guide.md).
 

@@ -241,6 +241,14 @@ public sealed class UpdaterTests
         await Assert.ThrowsAsync<ArgumentException>(() => f.Client.InstallAsync(CandidateFor("9.0.0")));
         Assert.Equal(0, f.Engine.Applies);
     }
+    [Fact] public async Task IncompleteReleaseSearchIsReportedWithoutClaimingUpToDate() {
+        await using var f = new Fixture();
+        f.Engine.Error = new ReleaseSearchIncompleteException();
+        var result = await f.Client.CheckAsync(CheckOrigin.Manual);
+        Assert.Equal(CheckOutcomeKind.ReleaseSearchIncomplete, result.Kind);
+        Assert.Contains("could not be determined", result.Message);
+        Assert.Null(f.Store.Value.LastSuccessfulCheckUtc);
+    }
     [Fact] public async Task FailedPreferenceWritePreservesLastGoodValue() {
         await using var f = new Fixture(); f.Store.Fail = true;
         await Assert.ThrowsAsync<IOException>(() => f.Client.SavePreferencesAsync(f.Client.Preferences with { CheckAutomatically = false }));
